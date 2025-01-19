@@ -32,4 +32,7 @@ ENV/
 
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Build artifacts
+bluez-alsa/ 
