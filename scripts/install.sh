@@ -21,7 +21,8 @@ check_status() {
 echo "Installing system dependencies..."
 sudo apt update
 sudo apt install -y build-essential autoconf automake libtool pkg-config \
-    libbluetooth-dev libasound2-dev bluez bluez-tools python3-pip git
+    libbluetooth-dev libasound2-dev bluez bluez-tools python3-pip git \
+    libsbc-dev libdbus-1-dev
 check_status "System dependencies"
 
 # Build and install BlueALSA
@@ -30,9 +31,13 @@ if [ ! -d "bluez-alsa" ]; then
     git clone https://github.com/Arkq/bluez-alsa.git
 fi
 cd bluez-alsa
+
+# Clean any previous build attempts
+git clean -fdx
+
 autoreconf --install
 mkdir -p build && cd build
-../configure --enable-aac --enable-ofono
+../configure --enable-aac --enable-ofono --prefix=/usr --sysconfdir=/etc
 make
 sudo make install
 check_status "BlueALSA build"
