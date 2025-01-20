@@ -23,6 +23,57 @@ if ! command -v pkg-config &> /dev/null; then
     exit 1
 fi
 
+# Check disk space
+echo "Checking disk space..."
+ROOT_SPACE=$(df -h / | awk 'NR==2 {print $4}' | sed 's/G//')
+ROOT_USED=$(df -h / | awk 'NR==2 {print $3}' | sed 's/G//')
+
+if (( $(echo "$ROOT_SPACE < 2" | bc -l) )); then
+    echo -e "${RED}Warning: Low disk space on root partition (${ROOT_SPACE}GB free)${NC}"
+    echo -e "Would you like to:"
+    echo "1. View largest files/directories"
+    echo "2. Run system cleanup"
+    echo "3. Continue anyway"
+    echo "4. Exit"
+    read -p "Choose an option (1-4): " choice
+    
+    case $choice in
+        1)
+            echo -e "\nLargest directories in root:"
+            sudo du -h --max-depth=2 / 2>/dev/null | sort -hr | head -n 10
+            echo -e "\nLargest files:"
+            sudo find / -type f -size +100M -exec ls -lh {} \; 2>/dev/null | sort -k5 -hr | head -n 10
+            exit 1
+            ;;
+        2)
+            echo -e "\nRunning system cleanup..."
+            sudo apt clean
+            sudo apt autoremove --purge -y
+            sudo journalctl --vacuum-time=1d
+            echo -e "Cleanup complete. New free space:"
+            df -h /
+            ;;
+        3)
+            echo -e "${RED}Continuing with low disk space...${NC}"
+            ;;
+        *)
+            echo "Exiting."
+            exit 1
+            ;;
+    esac
+fi
+
+# Check if system has old/unused packages
+REMOVABLE_PKGS=$(sudo apt autoremove -s | grep -c "^Remv")
+if [ "$REMOVABLE_PKGS" -gt 0 ]; then
+    echo -e "${RED}Warning: Found $REMOVABLE_PKGS packages that could be removed${NC}"
+    echo "Would you like to remove them before continuing? (y/n)"
+    read -p "> " clean_choice
+    if [[ $clean_choice =~ ^[Yy]$ ]]; then
+        sudo apt autoremove --purge -y
+    fi
+fi
+
 # Install system dependencies
 echo "Installing system dependencies..."
 
