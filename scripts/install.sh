@@ -17,6 +17,12 @@ check_status() {
     fi
 }
 
+# Check for required tools
+if ! command -v pkg-config &> /dev/null; then
+    echo -e "${RED}pkg-config not found. Installation will fail.${NC}"
+    exit 1
+fi
+
 # Install system dependencies
 echo "Installing system dependencies..."
 sudo apt update
@@ -27,9 +33,16 @@ check_status "System dependencies"
 
 # Build and install BlueALSA
 echo "Building BlueALSA..."
-if [ ! -d "bluez-alsa" ]; then
-    git clone https://github.com/Arkq/bluez-alsa.git
-fi
+
+# Remove existing service if present
+sudo systemctl stop bluealsa || true
+sudo rm -f /etc/systemd/system/bluealsa.service
+
+# Clean previous build
+rm -rf bluez-alsa
+
+# Clone and build
+git clone https://github.com/Arkq/bluez-alsa.git
 cd bluez-alsa
 
 # Clean any previous build attempts
@@ -53,7 +66,7 @@ After=bluetooth.service
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/bluealsa -p a2dp-sink
+ExecStart=/usr/bin/bluealsa -p a2dp-sink
 Restart=on-failure
 
 [Install]
@@ -73,7 +86,7 @@ sudo usermod -G bluetooth -a $USER
 check_status "User permissions"
 
 # Install Python package
-cd ../../
+cd "$(dirname "$0")/.."
 pip install -e .
 check_status "Python package"
 
