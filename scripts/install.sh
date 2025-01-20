@@ -25,11 +25,29 @@ fi
 
 # Install system dependencies
 echo "Installing system dependencies..."
-sudo apt update
-sudo apt install -y build-essential autoconf automake libtool pkg-config \
-    libbluetooth-dev libasound2-dev bluez bluez-tools python3-pip git \
-    libsbc-dev libdbus-1-dev
-check_status "System dependencies"
+
+# Update package lists
+sudo apt update || {
+    echo -e "${RED}Failed to update package lists${NC}"
+    exit 1
+}
+
+# Install dependencies in groups
+echo "→ Installing build tools..."
+sudo apt install -y build-essential autoconf automake libtool pkg-config git
+check_status "Build tools"
+
+echo "→ Installing bluetooth dependencies..."
+sudo apt install -y bluez bluez-tools libbluetooth-dev
+check_status "Bluetooth dependencies"
+
+echo "→ Installing audio dependencies..."
+sudo apt install -y libasound2-dev libsbc-dev
+check_status "Audio dependencies"
+
+echo "→ Installing Python dependencies..."
+sudo apt install -y python3-pip libdbus-1-dev
+check_status "Python dependencies"
 
 # Build and install BlueALSA
 echo -e "\n${GREEN}Building BlueALSA...${NC}"
