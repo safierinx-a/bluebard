@@ -133,16 +133,41 @@ cd bluez-alsa
 # Clean any previous build attempts
 git clean -fdx
 
+# Function to try alternative build method
+try_alternative_build() {
+    echo "→ Trying alternative build method..."
+    # Clean up any failed attempts
+    git clean -fdx
+    
+    # Try with minimal configuration
+    aclocal && \
+    libtoolize && \
+    autoheader && \
+    automake --add-missing && \
+    autoconf
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Alternative build method also failed${NC}"
+        return 1
+    fi
+    return 0
+}
+
 echo "→ Running autotools..."
-autoreconf --install || {
+(autoreconf --install || try_alternative_build) || {
     echo -e "${RED}Autotools configuration failed${NC}"
+    echo -e "Try running these commands manually:"
+    echo "sudo apt install --reinstall autoconf automake libtool"
+    echo "sudo apt install build-essential"
     exit 1
 }
 
 mkdir -p build && cd build
 echo "→ Configuring build..."
-../configure --enable-aac --enable-ofono --prefix=/usr --sysconfdir=/etc || {
+../configure --prefix=/usr --sysconfdir=/etc || {
     echo -e "${RED}Configure failed${NC}"
+    echo -e "Try running configure with fewer options:"
+    echo "../configure --prefix=/usr"
     exit 1
 }
 
