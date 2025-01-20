@@ -110,11 +110,23 @@ echo "→ Available memory: ${MEMORY_MB}MB"
 
 if [ $MEMORY_MB -lt 2048 ]; then
     echo "→ Low memory detected, setting up swap..."
-    sudo fallocate -l 1G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=1024
-    sudo chmod 600 /swapfile
-    sudo mkswap /swapfile
-    sudo swapon /swapfile
-    check_status "Swap setup"
+    
+    # Check if swap already exists
+    if swapon --show | grep -q /swapfile; then
+        echo "→ Swap file already exists and is in use"
+    else
+        # Remove any existing but unmounted swapfile
+        if [ -f /swapfile ]; then
+            sudo rm -f /swapfile
+        fi
+        
+        # Create new swap
+        sudo fallocate -l 1G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=1024
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        check_status "Swap setup"
+    fi
 fi
 
 # Remove existing service if present
@@ -181,9 +193,14 @@ check_status "BlueALSA build"
 # Remove swap if we added it
 if [ $MEMORY_MB -lt 2048 ]; then
     echo "→ Removing temporary swap..."
-    sudo swapoff /swapfile
-    sudo rm -f /swapfile
-    check_status "Swap cleanup"
+    # Only remove if we created it (not if it existed before)
+    if [ -f /swapfile ] && ! grep -q "^/swapfile" /etc/fstab; then
+        sudo swapoff /swapfile
+        sudo rm -f /swapfile
+        check_status "Swap cleanup"
+    else
+        echo "→ Keeping existing swap configuration"
+    fi
 fi
 
 # Create systemd service
