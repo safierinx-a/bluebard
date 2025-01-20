@@ -32,9 +32,24 @@ sudo apt install -y build-essential autoconf automake libtool pkg-config \
 check_status "System dependencies"
 
 # Build and install BlueALSA
-echo "Building BlueALSA..."
+echo -e "\n${GREEN}Building BlueALSA...${NC}"
+echo "This may take a few minutes on a Raspberry Pi"
+
+# Check memory and add swap if needed
+MEMORY_MB=$(free -m | awk '/^Mem:/{print $2}')
+echo "→ Available memory: ${MEMORY_MB}MB"
+
+if [ $MEMORY_MB -lt 2048 ]; then
+    echo "→ Low memory detected, setting up swap..."
+    sudo fallocate -l 1G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=1024
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    check_status "Swap setup"
+fi
 
 # Remove existing service if present
+echo "→ Cleaning previous installation..."
 sudo systemctl stop bluealsa || true
 sudo rm -f /etc/systemd/system/bluealsa.service
 
@@ -42,21 +57,43 @@ sudo rm -f /etc/systemd/system/bluealsa.service
 rm -rf bluez-alsa
 
 # Clone and build
+echo "→ Cloning BlueALSA repository..."
 git clone https://github.com/Arkq/bluez-alsa.git
 cd bluez-alsa
 
 # Clean any previous build attempts
 git clean -fdx
 
-autoreconf --install
+echo "→ Running autotools..."
+autoreconf --install || {
+    echo -e "${RED}Autotools configuration failed${NC}"
+    exit 1
+}
+
 mkdir -p build && cd build
-../configure --enable-aac --enable-ofono --prefix=/usr --sysconfdir=/etc
-make
+echo "→ Configuring build..."
+../configure --enable-aac --enable-ofono --prefix=/usr --sysconfdir=/etc || {
+    echo -e "${RED}Configure failed${NC}"
+    exit 1
+}
+
+# Use only 2 make jobs to avoid memory issues
+echo "→ Building BlueALSA (this may take a while)..."
+make -j2
+echo "→ Installing BlueALSA..."
 sudo make install
 check_status "BlueALSA build"
 
+# Remove swap if we added it
+if [ $MEMORY_MB -lt 2048 ]; then
+    echo "→ Removing temporary swap..."
+    sudo swapoff /swapfile
+    sudo rm -f /swapfile
+    check_status "Swap cleanup"
+fi
+
 # Create systemd service
-echo "Setting up BlueALSA service..."
+echo -e "\n${GREEN}Setting up BlueALSA service...${NC}"
 sudo tee /etc/systemd/system/bluealsa.service << EOF
 [Unit]
 Description=BluezALSA proxy
