@@ -223,57 +223,56 @@ class AudioInterface:
         }}
         """
 
-    async def set_volume(self, device_id: str, volume: float) -> None:
-        """Set volume for device (0.0 to 1.0)"""
-        if device_id not in self.devices:
-            raise ValueError(f"Unknown device: {device_id}")
+    async def get_volume(self, device: str) -> Optional[float]:
+        """Get volume for a device"""
+        try:
+            # Try different control names
+            for control in ["PCM", "Headphone", "Speaker", "Master"]:
+                try:
+                    result = subprocess.run(
+                        ["amixer", "-D", device, "sget", control],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    # Parse volume from output
+                    if match := re.search(r"(\d+)%", result.stdout):
+                        return float(match.group(1)) / 100
+                except subprocess.CalledProcessError:
+                    continue
+            return None
+        except Exception as e:
+            logging.error(f"Failed to get volume for {device}: {e}")
+            return None
+
+    async def set_volume(self, device: str, volume: float) -> bool:
+        """Set volume for a device (0.0 to 1.0)"""
+        if not 0 <= volume <= 1:
+            raise ValueError("Volume must be between 0.0 and 1.0")
 
         try:
-            volume_percent = int(max(0, min(100, volume * 100)))
-            proc = await asyncio.create_subprocess_exec(
-                "amixer",
-                "-c",
-                str(self.devices[device_id]["card_id"]),
-                "sset",
-                "Master",
-                f"{volume_percent}%",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-
-            if proc.returncode != 0:
-                raise RuntimeError(f"Failed to set volume: {stderr.decode()}")
-
-            self.devices[device_id]["volume"] = volume
-
+            # Try different control names
+            for control in ["PCM", "Headphone", "Speaker", "Master"]:
+                try:
+                    subprocess.run(
+                        [
+                            "amixer",
+                            "-D",
+                            device,
+                            "sset",
+                            control,
+                            f"{int(volume * 100)}%",
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                    return True
+                except subprocess.CalledProcessError:
+                    continue
+            raise Exception(f"No valid volume control found for {device}")
         except Exception as e:
-            self.logger.error(f"Failed to set volume for {device_id}: {e}")
-            raise
-
-    async def get_volume(self, device_id: str) -> Optional[float]:
-        """Get current volume level for device"""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "amixer",
-                "-c",
-                str(self.devices[device_id]["card_id"]),
-                "sget",
-                "Master",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-
-            if proc.returncode != 0:
-                raise RuntimeError(f"Failed to get volume: {stderr.decode()}")
-
-            match = re.search(r"\[(\d+)%\]", stdout.decode())
-            return float(match.group(1)) / 100 if match else None
-
-        except Exception as e:
-            self.logger.error(f"Failed to get volume for {device_id}: {e}")
-            raise
+            logging.error(f"Failed to set volume: {e}")
+            return False
 
     async def get_status(self) -> Dict:
         """Get current audio system status"""

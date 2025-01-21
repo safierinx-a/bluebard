@@ -52,8 +52,11 @@ class AudioTester:
         print("\nAvailable outputs:")
         for name, info in self.outputs.items():
             vol = await self.audio.get_volume(name)
-            print(f"- {name}")
-            print(f"  → Volume: {int(vol * 100)}%")
+            print(f"- {name} ({info['card_name']})")
+            if vol is not None:
+                print(f"  → Volume: {int(vol * 100)}%")
+            else:
+                print("  → Volume: Not available")
             # Show which devices are routed here
             routed = [mac for mac, out in self.device_routes.items() if out == name]
             if routed:

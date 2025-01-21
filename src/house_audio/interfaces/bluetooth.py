@@ -85,16 +85,24 @@ class BluetoothInterface:
     async def _set_discoverable(self, enabled: bool):
         """Set discoverable mode"""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "bluetoothctl",
-                "discoverable",
-                "on" if enabled else "off",
-                stdout=asyncio.subprocess.PIPE,
+            mode = "on" if enabled else "off"
+            subprocess.run(
+                ["bluetoothctl", "discoverable", mode], check=True, capture_output=True
             )
-            await proc.communicate()
+            subprocess.run(
+                ["bluetoothctl", "pairable", mode], check=True, capture_output=True
+            )
+            if enabled:
+                # Set no timeout when enabling
+                subprocess.run(
+                    ["bluetoothctl", "discoverable-timeout", "0"],
+                    check=True,
+                    capture_output=True,
+                )
+            return True
         except Exception as e:
-            self.logger.error(f"Failed to set discoverable mode: {e}")
-            raise
+            logging.error(f"Failed to set discoverable mode: {e}")
+            return False
 
     async def scan_devices(self) -> Dict[str, Dict]:
         """Scan for Bluetooth audio devices"""
