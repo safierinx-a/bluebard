@@ -85,7 +85,8 @@ sudo apt update || {
 
 # Install dependencies in groups
 echo "→ Installing build tools..."
-sudo apt install -y build-essential autoconf automake libtool pkg-config git
+sudo apt install -y build-essential autoconf automake libtool pkg-config git \
+    devscripts debhelper dh-autoreconf
 check_status "Build tools"
 
 echo "→ Installing bluetooth dependencies..."
@@ -142,53 +143,31 @@ echo "→ Cloning BlueALSA repository..."
 git clone https://github.com/Arkq/bluez-alsa.git
 cd bluez-alsa
 
-# Clean any previous build attempts
-git clean -fdx
+# Try Debian build method
+echo "→ Setting up Debian build..."
+mkdir -p debian
+cat > debian/control << EOF
+Source: bluez-alsa
+Section: sound
+Priority: optional
+Build-Depends: debhelper-compat (= 13),
+                dh-autoreconf,
+                libasound2-dev,
+                libbluetooth-dev,
+                libdbus-1-dev,
+                libglib2.0-dev,
+                libsbc-dev
+Standards-Version: 4.6.0
 
-# Function to try alternative build method
-try_alternative_build() {
-    echo "→ Trying alternative build method..."
-    # Clean up any failed attempts
-    git clean -fdx
-    
-    # Try with minimal configuration
-    aclocal && \
-    libtoolize && \
-    autoheader && \
-    automake --add-missing && \
-    autoconf
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Alternative build method also failed${NC}"
-        return 1
-    fi
-    return 0
-}
+Package: bluez-alsa
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Bluetooth Audio ALSA Backend
+ Bluetooth Audio ALSA Backend
+EOF
 
-echo "→ Running autotools..."
-(autoreconf --install || try_alternative_build) || {
-    echo -e "${RED}Autotools configuration failed${NC}"
-    echo -e "Try running these commands manually:"
-    echo "sudo apt install --reinstall autoconf automake libtool"
-    echo "sudo apt install build-essential"
-    exit 1
-}
-
-mkdir -p build && cd build
-echo "→ Configuring build..."
-../configure --prefix=/usr --sysconfdir=/etc || {
-    echo -e "${RED}Configure failed${NC}"
-    echo -e "Try running configure with fewer options:"
-    echo "../configure --prefix=/usr"
-    exit 1
-}
-
-# Use only 2 make jobs to avoid memory issues
-echo "→ Building BlueALSA (this may take a while)..."
-make -j2
-echo "→ Installing BlueALSA..."
-sudo make install
-check_status "BlueALSA build"
+# Build package
+dpkg-buildpackage -us -uc -b
 
 # Remove swap if we added it
 if [ $MEMORY_MB -lt 2048 ]; then
