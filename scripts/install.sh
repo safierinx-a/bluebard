@@ -32,6 +32,7 @@ check_package() {
 # Required packages based on codebase analysis
 REQUIRED_PACKAGES=(
     "bluez"              # Base Bluetooth stack
+    "bluez-alsa"         # BlueALSA core package
     "bluez-alsa-utils"   # BlueALSA utilities
     "python3-pip"        # Python package manager
     "libdbus-1-dev"      # D-Bus development files
@@ -142,6 +143,21 @@ echo "Installing Python package..."
 cd "$(dirname "$0")/.."
 pip install -e .
 check_status "Python package installation"
+
+# Function to verify audio setup
+verify_audio() {
+    # Check for audio devices
+    if ! aplay -l | grep -q "card"; then
+        echo -e "${RED}No audio devices found${NC}"
+        return 1
+    fi
+    return 0
+}
+
+# Verify audio devices
+echo "Checking audio devices..."
+verify_audio
+check_status "Audio device check"
 
 echo -e "\n${GREEN}Installation complete!${NC}"
 echo -e "\nNext steps:"
