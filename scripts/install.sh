@@ -186,6 +186,10 @@ pcm.bluealsa {
     volume_method "linear"
     soft_volume on
     volume_max 100
+    hint {
+        show on
+        description "Bluetooth Audio"
+    }
 }
 
 # Hardware devices with individual volume
@@ -200,6 +204,11 @@ pcm.headphones {
         }
         min_dB -51.0
         max_dB 0.0
+        resolution 256
+    }
+    hint {
+        show on
+        description "Headphones Output"
     }
 }
 
@@ -274,15 +283,19 @@ echo "Configuring Bluetooth..."
 HOSTNAME=$(hostname)
 BT_NAME="House Audio (${HOSTNAME})"
 
-bluetoothctl << EOF
-power on
-discoverable on
-discoverable-timeout 0
-pairable on
-agent on
-default-agent
-rename '${BT_NAME}'
-EOF
+# Configure Bluetooth step by step
+bluetoothctl power on
+bluetoothctl discoverable on
+bluetoothctl discoverable-timeout 0
+bluetoothctl pairable on
+# Set up agent properly
+bluetoothctl agent off
+bluetoothctl agent on
+bluetoothctl default-agent
+# Set friendly name
+bluetoothctl system-alias "${BT_NAME}"
+# Trust all devices
+bluetoothctl agent NoInputNoOutput
 check_status "Bluetooth configuration"
 
 # Test Bluetooth audio
@@ -344,16 +357,27 @@ verify_audio() {
     
     # Find available volume controls
     echo "Checking volume controls..."
-    # Set up initial volumes
-    for control in Master Headphones USB PCM; do
-        amixer sset "$control" 80% || true
+    # Get card controls
+    for card in $(aplay -l | grep '^card' | cut -d' ' -f2 | cut -d: -f1); do
+        echo "Setting up card $card controls..."
+        # Try common control names
+        for control in Master PCM Speaker Headphone; do
+            amixer -c $card sset "$control" 80% unmute 2>/dev/null || true
+        done
+        # Show what was set
+        amixer -c $card scontrols
     done
     
     # Test each output
     echo "Testing audio routing..."
     for output in default headphones usb; do
         echo "Testing $output output..."
-        timeout 2 speaker-test -D $output -t sine -f 440 -l 1 >/dev/null 2>&1
+        # Test volume control
+        for vol in 50 80; do
+            echo "Testing ${output} at ${vol}%..."
+            amixer -D $output sset Master ${vol}% 2>/dev/null || true
+            timeout 1 speaker-test -D $output -t sine -f 440 -l 1 >/dev/null 2>&1
+        done
     done
 
     return 0
