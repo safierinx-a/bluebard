@@ -227,13 +227,12 @@ EOF
     # Add Snapcast configuration if needed
     if [ "$INSTALL_MODE" = "multi-room" ]; then
         sudo tee -a /etc/asound.conf << EOF
-
-    # Snapcast support
-    pcm.snapcast {
-        type plug
-        slave.pcm "bluealsa"
-    }
-    EOF
+# Snapcast support
+pcm.snapcast {
+    type plug
+    slave.pcm "bluealsa"
+}
+EOF
     fi
 fi
 
