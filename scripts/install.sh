@@ -36,6 +36,8 @@ REQUIRED_PACKAGES=(
     "libasound2-plugins" # ALSA plugins including BlueALSA
     "python3-pip"        # Python package manager
     "libdbus-1-dev"      # D-Bus development files
+    "python3-dbus"       # D-Bus Python bindings
+    "python3-psutil"     # System utilities for Python
     "alsa-utils"         # ALSA utilities
     "snapclient"         # Snapcast client for multi-room audio
 )
@@ -151,7 +153,15 @@ check_status "User permissions"
 # Install Python package system-wide
 echo "Installing Python package system-wide..."
 cd "$(dirname "$0")/.."
-sudo pip3 install --break-system-packages -e .
+# Install dependencies first
+sudo pip3 install --break-system-packages wheel setuptools
+
+# Try installing with pip directly first
+if ! sudo pip3 install --break-system-packages -e .; then
+    echo "Pip install failed, trying alternative installation..."
+    # Try installing with python directly
+    sudo python3 setup.py install --force
+fi
 check_status "Python package installation"
 
 # Function to verify audio setup

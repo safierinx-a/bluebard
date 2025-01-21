@@ -6,6 +6,9 @@ setup(
     packages=find_packages("src"),
     package_dir={"": "src"},
     install_requires=[
-        # Add dependencies if needed
+        "dbus-python",  # For D-Bus communication
+        "psutil",  # For system monitoring
+        "asyncio",  # For async support
     ],
+    python_requires=">=3.7",
 )
