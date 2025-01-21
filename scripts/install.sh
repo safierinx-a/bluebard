@@ -29,6 +29,21 @@ check_package() {
     fi
 }
 
+# Parse command line arguments
+INSTALL_MODE="standalone"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --multi-room)
+            INSTALL_MODE="multi-room"
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
 # Required packages based on codebase analysis
 REQUIRED_PACKAGES=(
     "bluez"              # Base Bluetooth stack
@@ -39,8 +54,14 @@ REQUIRED_PACKAGES=(
     "python3-dbus"       # D-Bus Python bindings
     "python3-psutil"     # System utilities for Python
     "alsa-utils"         # ALSA utilities
-    "snapclient"         # Snapcast client for multi-room audio
 )
+
+# Add multi-room packages if needed
+if [ "$INSTALL_MODE" = "multi-room" ]; then
+    REQUIRED_PACKAGES+=(
+        "snapclient"     # Snapcast client for multi-room audio
+    )
+fi
 
 # Check system requirements
 echo "Checking system requirements..."
@@ -96,25 +117,117 @@ fi
 # Configure audio
 echo -e "\nConfiguring audio system..."
 
+# Detect primary audio output
+if aplay -l | grep -q "USB Audio"; then
+    DEFAULT_CARD="2"  # USB Audio
+    DEFAULT_DEVICE="USB Audio"
+elif aplay -l | grep -q "Headphones"; then
+    DEFAULT_CARD="1"  # Headphones
+    DEFAULT_DEVICE="Headphones"
+else
+    DEFAULT_CARD="0"  # HDMI
+    DEFAULT_DEVICE="HDMI"
+fi
+echo "→ Using $DEFAULT_DEVICE as primary output"
+
 # Set up ALSA config if it doesn't exist
 if [ ! -f /etc/asound.conf ]; then
     echo "Creating ALSA configuration..."
     sudo tee /etc/asound.conf << EOF
-pcm.!default {
-    type plug
-    slave.pcm "bluealsa"
-}
-
-ctl.!default {
-    type hw
-    card 0
-}
-
-defaults.bluealsa.interface "hci0"
-defaults.bluealsa.profile "a2dp"
-defaults.bluealsa.delay 10000
-EOF
+    # Software volume control
+    pcm.softvol {
+        type softvol
+        slave.pcm "dmix"
+        control {
+            name "Master"
+            card ${DEFAULT_CARD}
+        }
+    }
+    
+    # Hardware mixing
+    pcm.dmix {
+        type dmix
+        ipc_key 1024
+        slave {
+            pcm "hw:${DEFAULT_CARD},0"
+            period_time 0
+            period_size 1024
+            buffer_size 4096
+            rate 44100
+        }
+    }
+    
+    # Default PCM device (BlueALSA)
+    pcm.!default {
+        type plug
+        slave.pcm "softvol"
+    }
+    
+    # BlueALSA configuration
+    pcm.bluealsa {
+        type bluealsa
+        interface "hci0"
+        profile "a2dp"
+        delay 10000
+        volume_method "linear"
+    }
+    
+    # Hardware devices
+    pcm.headphones {
+        type plug
+        slave.pcm "softvol"
+        hint {
+            show on
+            description "Headphones Output"
+        }
+    }
+    
+    pcm.usb {
+        type plug
+        slave.pcm "softvol"
+        hint {
+            show on
+            description "USB Audio Output"
+        }
+    }
+    
+    # Individual volume controls
+    pcm.headphones_vol {
+        type softvol
+        slave.pcm "hw:1,0"
+        control {
+            name "Headphones"
+            card 1
+        }
+    }
+    
+    pcm.usb_vol {
+        type softvol
+        slave.pcm "hw:2,0"
+        control {
+            name "USB"
+            card 2
+        }
+    }
+    
+    ctl.!default {
+        type hw
+        card ${DEFAULT_CARD}
+    }
+    EOF
     check_status "ALSA configuration"
+
+    # Add Snapcast configuration if needed
+    if [ "$INSTALL_MODE" = "multi-room" ]; then
+        sudo tee -a /etc/asound.conf << EOF
+
+    # Snapcast support
+    pcm.snapcast {
+        type plug
+        slave.pcm "bluealsa"
+    }
+    EOF
+    fi
 fi
 
 # Set up BlueALSA service
@@ -139,11 +252,38 @@ check_status "Service configuration"
 # Enable and start services
 echo "Starting services..."
 sudo systemctl daemon-reload
-for service in bluetooth bluealsa snapclient; do
+SERVICES=("bluetooth" "bluealsa")
+if [ "$INSTALL_MODE" = "multi-room" ]; then
+    SERVICES+=("snapclient")
+fi
+for service in "${SERVICES[@]}"; do
     sudo systemctl enable $service
     sudo systemctl restart $service
     check_status "Service $service"
 done
+
+# Configure Bluetooth
+echo "Configuring Bluetooth..."
+# Set friendly name based on hostname
+HOSTNAME=$(hostname)
+BT_NAME="House Audio (${HOSTNAME})"
+
+bluetoothctl << EOF
+power on
+discoverable on
+discoverable-timeout 0
+pairable on
+agent on
+default-agent
+rename '${BT_NAME}'
+EOF
+check_status "Bluetooth configuration"
+
+# Test Bluetooth audio
+echo "Testing Bluetooth audio setup..."
+if ! timeout 5 bluealsa-aplay -L; then
+    echo -e "${YELLOW}Warning: BlueALSA playback test failed${NC}"
+fi
 
 # Set up user permissions
 echo "Setting up permissions..."
@@ -166,20 +306,50 @@ check_status "Python package installation"
 
 # Function to verify audio setup
 verify_audio() {
+    echo "Checking audio devices..."
+    aplay -l
+    
+    # Check BlueALSA
+    if ! systemctl is-active --quiet bluealsa; then
+        echo -e "${RED}BlueALSA service not running${NC}"
+        return 1
+    fi
+    
+    # Only check Snapcast in multi-room mode
+    if [ "$INSTALL_MODE" = "multi-room" ]; then
+        if ! systemctl is-active --quiet snapclient; then
+            echo -e "${RED}Snapcast client not running${NC}"
+            return 1
+        fi
+    fi
+    
     # Check for audio devices
     if ! aplay -l | grep -q "card"; then
         echo -e "${RED}No audio devices found${NC}"
         return 1
     fi
     
+    echo "Checking ALSA configuration..."
     # Set up default sound card if needed
     if ! grep -q "defaults.pcm.card 0" /etc/asound.conf 2>/dev/null; then
         echo "defaults.pcm.card 0" | sudo tee -a /etc/asound.conf
         echo "defaults.ctl.card 0" | sudo tee -a /etc/asound.conf
     fi
     
-    # Test volume control
-    amixer sset 'PCM' 80% || true
+    # Find available volume controls
+    echo "Checking volume controls..."
+    # Set up initial volumes
+    for control in Master Headphones USB PCM; do
+        amixer sset "$control" 80% || true
+    done
+    
+    # Test each output
+    echo "Testing audio routing..."
+    for output in default headphones usb; do
+        echo "Testing $output output..."
+        timeout 2 speaker-test -D $output -t sine -f 440 -l 1 >/dev/null 2>&1
+    done
+
     return 0
 }
 
