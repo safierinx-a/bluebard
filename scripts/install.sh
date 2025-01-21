@@ -323,76 +323,7 @@ if ! sudo pip3 install --break-system-packages -e .; then
 fi
 check_status "Python package installation"
 
-# Function to verify audio setup
-verify_audio() {
-    echo "Checking audio devices..."
-    aplay -l
-    
-    # Check BlueALSA
-    if ! systemctl is-active --quiet bluealsa; then
-        echo -e "${RED}BlueALSA service not running${NC}"
-        return 1
-    fi
-    
-    # Only check Snapcast in multi-room mode
-    if [ "$INSTALL_MODE" = "multi-room" ]; then
-        if ! systemctl is-active --quiet snapclient; then
-            echo -e "${RED}Snapcast client not running${NC}"
-            return 1
-        fi
-    fi
-    
-    # Check for audio devices
-    if ! aplay -l | grep -q "card"; then
-        echo -e "${RED}No audio devices found${NC}"
-        return 1
-    fi
-    
-    echo "Checking ALSA configuration..."
-    # Set up default sound card if needed
-    if ! grep -q "defaults.pcm.card 0" /etc/asound.conf 2>/dev/null; then
-        echo "defaults.pcm.card 0" | sudo tee -a /etc/asound.conf
-        echo "defaults.ctl.card 0" | sudo tee -a /etc/asound.conf
-    fi
-    
-    # Find available volume controls
-    echo "Checking volume controls..."
-    # Get card controls
-    for card in $(aplay -l | grep '^card' | cut -d' ' -f2 | cut -d: -f1); do
-        echo "Setting up card $card controls..."
-        # Try common control names
-        for control in Master PCM Speaker Headphone; do
-            amixer -c $card sset "$control" 80% unmute 2>/dev/null || true
-        done
-        # Show what was set
-        amixer -c $card scontrols
-    done
-    
-    # Test each output
-    echo "Testing audio routing..."
-    for output in default headphones usb; do
-        echo "Testing $output output..."
-        # Test volume control
-        for vol in 50 80; do
-            echo "Testing ${output} at ${vol}%..."
-            amixer -D $output sset Master ${vol}% 2>/dev/null || true
-            timeout 1 speaker-test -D $output -t sine -f 440 -l 1 >/dev/null 2>&1
-        done
-    done
-
-    return 0
-}
-
-# Verify audio devices
-echo "Checking audio devices..."
-verify_audio
-check_status "Audio device check"
-
 echo -e "\n${GREEN}Installation complete!${NC}"
 echo -e "\nNext steps:"
 echo "1. Log out and log back in for permissions to take effect"
-echo "2. Run './scripts/check_setup.py' to verify installation"
-echo "3. Test audio with: python3 -m house_audio.tools.test_audio"
-echo "   - Your Pi will be discoverable as 'House Audio'"
-echo "   - Connect from your phone/laptop"
-echo "   - Use 's' to show devices, 'v 0-100' for volume" 
+echo "2. Test audio with: python3 -m house_audio.tools.test_audio" 
