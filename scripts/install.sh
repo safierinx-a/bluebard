@@ -3,7 +3,8 @@
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-NC='\033[0m' # No Color
+YELLOW='\033[1;33m'
+NC='\033[0m'
 
 echo -e "${GREEN}Installing Bluebard Audio System...${NC}"
 
@@ -17,85 +18,94 @@ check_status() {
     fi
 }
 
-# Check for required tools
-if ! command -v pkg-config &> /dev/null; then
-    echo -e "${RED}pkg-config not found. Installation will fail.${NC}"
-    exit 1
+# Function to check if a package is installed
+check_package() {
+    if dpkg -l "$1" &> /dev/null; then
+        echo -e "${GREEN}✓ $1 is installed${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}! $1 needs to be installed${NC}"
+        return 1
+    fi
+}
+
+# Required packages based on codebase analysis
+REQUIRED_PACKAGES=(
+    "bluez"              # Base Bluetooth stack
+    "bluez-alsa-utils"   # BlueALSA utilities
+    "python3-pip"        # Python package manager
+    "libdbus-1-dev"      # D-Bus development files
+    "alsa-utils"         # ALSA utilities
+    "snapclient"         # Snapcast client for multi-room audio
+)
+
+# Check system requirements
+echo "Checking system requirements..."
+
+# Verify we're on a Raspberry Pi
+if ! grep -q "Raspberry Pi" /proc/cpuinfo; then
+    echo -e "${YELLOW}Warning: This system may not be a Raspberry Pi${NC}"
+    read -p "Continue anyway? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
 fi
 
 # Check disk space
 echo "Checking disk space..."
 ROOT_SPACE=$(df -h / | awk 'NR==2 {print $4}' | sed 's/G//')
-ROOT_USED=$(df -h / | awk 'NR==2 {print $3}' | sed 's/G//')
-
 if (( $(echo "$ROOT_SPACE < 2" | bc -l) )); then
-    echo -e "${RED}Warning: Low disk space on root partition (${ROOT_SPACE}GB free)${NC}"
-    echo -e "Would you like to:"
-    echo "1. View largest files/directories"
-    echo "2. Run system cleanup"
-    echo "3. Continue anyway"
-    echo "4. Exit"
-    read -p "Choose an option (1-4): " choice
-    
-    case $choice in
-        1)
-            echo -e "\nLargest directories in root:"
-            sudo du -h --max-depth=2 / 2>/dev/null | sort -hr | head -n 10
-            echo -e "\nLargest files:"
-            sudo find / -type f -size +100M -exec ls -lh {} \; 2>/dev/null | sort -k5 -hr | head -n 10
-            exit 1
-            ;;
-        2)
-            echo -e "\nRunning system cleanup..."
-            sudo apt clean
-            sudo apt autoremove --purge -y
-            sudo journalctl --vacuum-time=1d
-            echo -e "Cleanup complete. New free space:"
-            df -h /
-            ;;
-        3)
-            echo -e "${RED}Continuing with low disk space...${NC}"
-            ;;
-        *)
-            echo "Exiting."
-            exit 1
-            ;;
-    esac
-fi
-
-# Check if system has old/unused packages
-REMOVABLE_PKGS=$(sudo apt autoremove -s | grep -c "^Remv")
-if [ "$REMOVABLE_PKGS" -gt 0 ]; then
-    echo -e "${RED}Warning: Found $REMOVABLE_PKGS packages that could be removed${NC}"
-    echo "Would you like to remove them before continuing? (y/n)"
-    read -p "> " clean_choice
-    if [[ $clean_choice =~ ^[Yy]$ ]]; then
-        sudo apt autoremove --purge -y
-    fi
-fi
-
-# Install system dependencies
-echo "Installing system dependencies..."
-
-# Fix corrupted package lists
-sudo rm -rf /var/lib/apt/lists/*
-sudo apt clean
-sudo apt update || {
-    echo -e "${RED}Failed to update package lists${NC}"
+    echo -e "${RED}Error: Insufficient disk space. Need at least 2GB free.${NC}"
     exit 1
-}
+fi
 
-# Install dependencies in groups
-echo "→ Installing build tools..."
-sudo apt install -y bluez bluez-alsa-utils
-check_status "Build tools"
+# Check existing packages
+echo -e "\nChecking existing packages..."
+PACKAGES_TO_INSTALL=()
+for pkg in "${REQUIRED_PACKAGES[@]}"; do
+    if ! check_package "$pkg"; then
+        PACKAGES_TO_INSTALL+=("$pkg")
+    fi
+done
 
-echo "→ Installing Python dependencies..."
-sudo apt install -y python3-pip libdbus-1-dev
-check_status "Python dependencies"
+# Update package lists if needed
+if [ ${#PACKAGES_TO_INSTALL[@]} -gt 0 ]; then
+    echo -e "\nUpdating package lists..."
+    sudo apt update || {
+        echo -e "${RED}Failed to update package lists${NC}"
+        echo "Trying alternative mirrors..."
+        sudo rm -rf /var/lib/apt/lists/*
+        sudo apt clean
+        sudo sed -i 's/deb.debian.org/archive.raspberrypi.org/g' /etc/apt/sources.list
+        sudo apt update || {
+            echo -e "${RED}Package update failed. Please check your internet connection.${NC}"
+            exit 1
+        }
+    }
 
-# Create systemd service
-echo -e "\n${GREEN}Setting up BlueALSA service...${NC}"
+    # Install missing packages
+    echo -e "\nInstalling required packages..."
+    sudo apt install -y "${PACKAGES_TO_INSTALL[@]}"
+    check_status "Package installation"
+fi
+
+# Configure audio
+echo -e "\nConfiguring audio system..."
+
+# Set up ALSA config if it doesn't exist
+if [ ! -f /etc/asound.conf ]; then
+    echo "Creating ALSA configuration..."
+    sudo tee /etc/asound.conf << EOF
+defaults.bluealsa.interface "hci0"
+defaults.bluealsa.profile "a2dp"
+defaults.bluealsa.delay 10000
+EOF
+    check_status "ALSA configuration"
+fi
+
+# Set up BlueALSA service
+echo "Setting up BlueALSA service..."
 sudo tee /etc/systemd/system/bluealsa.service << EOF
 [Unit]
 Description=BluezALSA proxy
@@ -111,23 +121,30 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
-check_status "Service file creation"
+check_status "Service configuration"
 
 # Enable and start services
 echo "Starting services..."
 sudo systemctl daemon-reload
-sudo systemctl enable bluetooth bluealsa
-sudo systemctl start bluetooth bluealsa
-check_status "Services"
+for service in bluetooth bluealsa snapclient; do
+    sudo systemctl enable $service
+    sudo systemctl restart $service
+    check_status "Service $service"
+done
 
-# Add user to bluetooth group
-sudo usermod -G bluetooth -a $USER
+# Set up user permissions
+echo "Setting up permissions..."
+sudo usermod -a -G bluetooth,audio $USER
 check_status "User permissions"
 
 # Install Python package
+echo "Installing Python package..."
 cd "$(dirname "$0")/.."
 pip install -e .
-check_status "Python package"
+check_status "Python package installation"
 
-echo -e "${GREEN}Installation complete!${NC}"
-echo "Please log out and log back in for bluetooth permissions to take effect." 
+echo -e "\n${GREEN}Installation complete!${NC}"
+echo -e "\nNext steps:"
+echo "1. Log out and log back in for permissions to take effect"
+echo "2. Run './scripts/check_setup.py' to verify installation"
+echo "3. Test audio with './scripts/test_audio.py'" 
