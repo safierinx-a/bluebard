@@ -36,9 +36,7 @@ async def test_bluetooth_audio():
         print("q: Quit")
 
         # Start bluealsa-aplay
-        bluealsa_process = subprocess.Popen(
-            ["bluealsa-aplay", "--profile-a2dp", "--device", default_output]
-        )
+        bluealsa_process = subprocess.Popen(["bluealsa-aplay", "--profile-a2dp"])
 
         while True:
             cmd = input("> ").strip()

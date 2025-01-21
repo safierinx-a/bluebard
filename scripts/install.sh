@@ -98,6 +98,16 @@ echo -e "\nConfiguring audio system..."
 if [ ! -f /etc/asound.conf ]; then
     echo "Creating ALSA configuration..."
     sudo tee /etc/asound.conf << EOF
+pcm.!default {
+    type plug
+    slave.pcm "bluealsa"
+}
+
+ctl.!default {
+    type hw
+    card 0
+}
+
 defaults.bluealsa.interface "hci0"
 defaults.bluealsa.profile "a2dp"
 defaults.bluealsa.delay 10000
@@ -151,6 +161,15 @@ verify_audio() {
         echo -e "${RED}No audio devices found${NC}"
         return 1
     fi
+    
+    # Set up default sound card if needed
+    if ! grep -q "defaults.pcm.card 0" /etc/asound.conf 2>/dev/null; then
+        echo "defaults.pcm.card 0" | sudo tee -a /etc/asound.conf
+        echo "defaults.ctl.card 0" | sudo tee -a /etc/asound.conf
+    fi
+    
+    # Test volume control
+    amixer sset 'PCM' 80% || true
     return 0
 }
 
@@ -163,4 +182,7 @@ echo -e "\n${GREEN}Installation complete!${NC}"
 echo -e "\nNext steps:"
 echo "1. Log out and log back in for permissions to take effect"
 echo "2. Run './scripts/check_setup.py' to verify installation"
-echo "3. Test audio with './scripts/test_audio.py'" 
+echo "3. Test audio with: python3 -m house_audio.tools.test_audio"
+echo "   - Your Pi will be discoverable as 'House Audio'"
+echo "   - Connect from your phone/laptop"
+echo "   - Use 's' to show devices, 'v 0-100' for volume" 
