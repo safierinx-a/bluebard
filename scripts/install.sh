@@ -134,87 +134,94 @@ echo "→ Using $DEFAULT_DEVICE as primary output"
 if [ ! -f /etc/asound.conf ]; then
     echo "Creating ALSA configuration..."
     sudo tee /etc/asound.conf << EOF
-    # Software volume control
-    pcm.softvol {
-        type softvol
+# Software volume control
+pcm.softvol {
+    type softvol
+    slave.pcm "merged"
+    control {
+        name "Master"
+        card ${DEFAULT_CARD}
+    }
+}
+
+# Merge all outputs
+pcm.merged {
+    type asym
+    playback.pcm {
+        type plug
         slave.pcm "dmix"
-        control {
-            name "Master"
-            card ${DEFAULT_CARD}
-        }
     }
-    
-    # Hardware mixing
-    pcm.dmix {
-        type dmix
-        ipc_key 1024
-        slave {
-            pcm "hw:${DEFAULT_CARD},0"
-            period_time 0
-            period_size 1024
-            buffer_size 4096
-            rate 44100
-        }
-    }
-    
-    # Default PCM device (BlueALSA)
-    pcm.!default {
+    capture.pcm {
         type plug
-        slave.pcm "softvol"
+        slave.pcm "dsnoop"
     }
-    
-    # BlueALSA configuration
-    pcm.bluealsa {
-        type bluealsa
-        interface "hci0"
-        profile "a2dp"
-        delay 10000
-        volume_method "linear"
+}
+
+# Hardware mixing
+pcm.dmix {
+    type dmix
+    ipc_key 1024
+    slave {
+        pcm "hw:${DEFAULT_CARD},0"
+        period_time 0
+        period_size 1024
+        buffer_size 4096
+        rate 44100
+        format S32_LE  # Better quality
     }
-    
-    # Hardware devices
-    pcm.headphones {
-        type plug
-        slave.pcm "softvol"
-        hint {
-            show on
-            description "Headphones Output"
-        }
-    }
-    
-    pcm.usb {
-        type plug
-        slave.pcm "softvol"
-        hint {
-            show on
-            description "USB Audio Output"
-        }
-    }
-    
-    # Individual volume controls
-    pcm.headphones_vol {
+}
+
+# Default PCM device (BlueALSA)
+pcm.!default {
+    type plug
+    slave.pcm "softvol"
+}
+
+# BlueALSA configuration
+pcm.bluealsa {
+    type bluealsa
+    interface "hci0"
+    profile "a2dp"
+    delay 20000  # Increased for better sync
+    volume_method "linear"
+    soft_volume on
+    volume_max 100
+}
+
+# Hardware devices with individual volume
+pcm.headphones {
+    type plug
+    slave.pcm {
         type softvol
         slave.pcm "hw:1,0"
         control {
             name "Headphones"
             card 1
         }
+        min_dB -51.0
+        max_dB 0.0
     }
-    
-    pcm.usb_vol {
+}
+
+pcm.usb {
+    type plug
+    slave.pcm {
         type softvol
         slave.pcm "hw:2,0"
         control {
             name "USB"
             card 2
         }
+        min_dB -51.0
+        max_dB 0.0
     }
-    
-    ctl.!default {
-        type hw
-        card ${DEFAULT_CARD}
-    }
-    EOF
+}
+
+ctl.!default {
+    type hw
+    card ${DEFAULT_CARD}
+}
+EOF
     check_status "ALSA configuration"
 
     # Add Snapcast configuration if needed
