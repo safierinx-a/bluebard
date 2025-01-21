@@ -32,8 +32,8 @@ check_package() {
 # Required packages based on codebase analysis
 REQUIRED_PACKAGES=(
     "bluez"              # Base Bluetooth stack
-    "bluez-alsa"         # BlueALSA core package
     "bluez-alsa-utils"   # BlueALSA utilities
+    "libasound2-plugins" # ALSA plugins including BlueALSA
     "python3-pip"        # Python package manager
     "libdbus-1-dev"      # D-Bus development files
     "alsa-utils"         # ALSA utilities
