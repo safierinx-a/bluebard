@@ -77,7 +77,9 @@ fi
 # Install system dependencies
 echo "Installing system dependencies..."
 
-# Update package lists
+# Fix corrupted package lists
+sudo rm -rf /var/lib/apt/lists/*
+sudo apt clean
 sudo apt update || {
     echo -e "${RED}Failed to update package lists${NC}"
     exit 1
@@ -85,102 +87,12 @@ sudo apt update || {
 
 # Install dependencies in groups
 echo "→ Installing build tools..."
-sudo apt install -y build-essential autoconf automake libtool pkg-config git \
-    devscripts debhelper dh-autoreconf
+sudo apt install -y bluez bluez-alsa-utils
 check_status "Build tools"
-
-echo "→ Installing bluetooth dependencies..."
-sudo apt install -y bluez bluez-tools libbluetooth-dev
-check_status "Bluetooth dependencies"
-
-echo "→ Installing audio dependencies..."
-sudo apt install -y libasound2-dev libsbc-dev
-check_status "Audio dependencies"
 
 echo "→ Installing Python dependencies..."
 sudo apt install -y python3-pip libdbus-1-dev
 check_status "Python dependencies"
-
-# Build and install BlueALSA
-echo -e "\n${GREEN}Building BlueALSA...${NC}"
-echo "This may take a few minutes on a Raspberry Pi"
-
-# Check memory and add swap if needed
-MEMORY_MB=$(free -m | awk '/^Mem:/{print $2}')
-echo "→ Available memory: ${MEMORY_MB}MB"
-
-if [ $MEMORY_MB -lt 2048 ]; then
-    echo "→ Low memory detected, setting up swap..."
-    
-    # Check if swap already exists
-    if swapon --show | grep -q /swapfile; then
-        echo "→ Swap file already exists and is in use"
-    else
-        # Remove any existing but unmounted swapfile
-        if [ -f /swapfile ]; then
-            sudo rm -f /swapfile
-        fi
-        
-        # Create new swap
-        sudo fallocate -l 1G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=1024
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
-        check_status "Swap setup"
-    fi
-fi
-
-# Remove existing service if present
-echo "→ Cleaning previous installation..."
-sudo systemctl stop bluealsa || true
-sudo rm -f /etc/systemd/system/bluealsa.service
-
-# Clean previous build
-rm -rf bluez-alsa
-
-# Clone and build
-echo "→ Cloning BlueALSA repository..."
-git clone https://github.com/Arkq/bluez-alsa.git
-cd bluez-alsa
-
-# Try Debian build method
-echo "→ Setting up Debian build..."
-mkdir -p debian
-cat > debian/control << EOF
-Source: bluez-alsa
-Section: sound
-Priority: optional
-Build-Depends: debhelper-compat (= 13),
-                dh-autoreconf,
-                libasound2-dev,
-                libbluetooth-dev,
-                libdbus-1-dev,
-                libglib2.0-dev,
-                libsbc-dev
-Standards-Version: 4.6.0
-
-Package: bluez-alsa
-Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: Bluetooth Audio ALSA Backend
- Bluetooth Audio ALSA Backend
-EOF
-
-# Build package
-dpkg-buildpackage -us -uc -b
-
-# Remove swap if we added it
-if [ $MEMORY_MB -lt 2048 ]; then
-    echo "→ Removing temporary swap..."
-    # Only remove if we created it (not if it existed before)
-    if [ -f /swapfile ] && ! grep -q "^/swapfile" /etc/fstab; then
-        sudo swapoff /swapfile
-        sudo rm -f /swapfile
-        check_status "Swap cleanup"
-    else
-        echo "→ Keeping existing swap configuration"
-    fi
-fi
 
 # Create systemd service
 echo -e "\n${GREEN}Setting up BlueALSA service...${NC}"
