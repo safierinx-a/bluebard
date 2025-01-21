@@ -138,10 +138,10 @@ echo "Setting up permissions..."
 sudo usermod -a -G bluetooth,audio $USER
 check_status "User permissions"
 
-# Install Python package
-echo "Installing Python package..."
+# Install Python package system-wide
+echo "Installing Python package system-wide..."
 cd "$(dirname "$0")/.."
-pip install -e .
+sudo pip3 install --break-system-packages -e .
 check_status "Python package installation"
 
 # Function to verify audio setup
