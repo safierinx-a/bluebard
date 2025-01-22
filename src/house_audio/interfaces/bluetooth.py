@@ -110,7 +110,21 @@ class BluetoothInterface:
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
                 self.logger.error(f"Failed to set agent mode: {stderr.decode()}")
-                return False
+                # Continue anyway - some systems don't support DisplayOnly
+                self.logger.info("Falling back to NoInputNoOutput agent")
+                proc = await asyncio.create_subprocess_exec(
+                    "bluetoothctl",
+                    "agent",
+                    "NoInputNoOutput",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    self.logger.error(
+                        f"Failed to set fallback agent: {stderr.decode()}"
+                    )
+                    return False
 
             # Set as default
             proc = await asyncio.create_subprocess_exec(
@@ -122,7 +136,8 @@ class BluetoothInterface:
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
                 self.logger.error(f"Failed to set default agent: {stderr.decode()}")
-                return False
+                # Not a fatal error - continue
+                self.logger.warning("Agent setup incomplete but continuing")
 
             return True
         except Exception as e:

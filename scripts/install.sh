@@ -49,6 +49,8 @@ REQUIRED_PACKAGES=(
     "bluez"              # Base Bluetooth stack
     "bluez-alsa-utils"   # BlueALSA utilities
     "bluez-tools"        # Includes bt-agent
+    "libasound2-dev"     # ALSA development files
+    "libbluetooth-dev"   # Bluetooth development files
     "libasound2-plugins" # ALSA plugins including BlueALSA
     "python3-pip"        # Python package manager
     "libdbus-1-dev"      # D-Bus development files
@@ -183,14 +185,9 @@ pcm.bluealsa {
     type bluealsa
     interface "hci0"
     profile "a2dp"
-    delay 20000  # Increased for better sync
+    delay 10000  # Standard delay value
     volume_method "linear"
     soft_volume on
-    volume_max 100
-    hint {
-        show on
-        description "Bluetooth Audio"
-    }
 }
 
 # Hardware devices with individual volume
@@ -253,13 +250,14 @@ sudo tee /etc/systemd/system/bluealsa.service << EOF
 Description=BluezALSA proxy
 Requires=bluetooth.service
 After=bluetooth.service
+Before=bluealsa-aplay.service
 PartOf=bluetooth.service
 
 [Service]
 Type=simple
 User=root
 ExecStart=/usr/bin/bluealsa -p a2dp-sink -p a2dp-source
-ExecStartPre=/bin/sleep 2
+ExecStartPre=/bin/sleep 3
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=10
@@ -289,18 +287,17 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Enable and start services
+# Enable and start services in correct order
 echo "Starting services..."
 sudo systemctl daemon-reload
-SERVICES=("bluetooth" "bluealsa" "bluealsa-aplay")
-if [ "$INSTALL_MODE" = "multi-room" ]; then
-    SERVICES+=("snapclient")
-fi
-for service in "${SERVICES[@]}"; do
-    sudo systemctl enable $service
-    sudo systemctl restart $service
-    check_status "Service $service"
-done
+# Start services with proper delays
+sudo systemctl restart bluetooth
+sleep 2
+sudo systemctl restart bt-agent
+sleep 2
+sudo systemctl restart bluealsa
+sleep 2
+sudo systemctl restart bluealsa-aplay
 
 # Configure Bluetooth
 echo "Configuring Bluetooth..."
@@ -308,16 +305,21 @@ echo "Configuring Bluetooth..."
 # Set up Bluetooth agent
 sudo tee /etc/bluetooth/main.conf << EOF
 [General]
-DiscoverableTimeout = 0
-Discoverable = true
-Name = House Audio
-# Enable SSP (Secure Simple Pairing)
-SSPCapability = true
+DiscoverableTimeout=0
+Class=0x200414  # Audio device
+Name=House Audio
+Discoverable=true
+# Pairing options
+Privacy=off
+JustWorksRepairing=always
+
+[GATT]
+Cache=always
 
 [Policy]
-AutoEnable = true
-ReconnectAttempts = 3
-ReconnectIntervals = 1,2,4
+AutoEnable=true
+ReconnectAttempts=3
+ReconnectIntervals=1,2,4
 EOF
 
 # Configure authentication agent
@@ -325,12 +327,19 @@ sudo tee /etc/systemd/system/bt-agent.service << EOF
 [Unit]
 Description=Bluetooth Auth Agent
 After=bluetooth.service
+Requires=bluetooth.service
+Before=bluealsa.service
+PartOf=bluetooth.service
 
 [Service]
 Type=simple
-# Use DisplayOnly agent for PIN code display
-ExecStart=/usr/bin/bt-agent -c DisplayOnly
+ExecStart=/usr/bin/bt-agent -c NoInputNoOutput --capability=NoInputNoOutput
+ExecStartPre=/bin/sleep 2
 Environment=DISPLAY=:0
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target
@@ -368,6 +377,20 @@ if ! sudo pip3 install --break-system-packages -e .; then
     sudo python3 setup.py install --force
 fi
 check_status "Python package installation"
+
+# Enable experimental features
+sudo mkdir -p /etc/systemd/system/bluetooth.service.d
+sudo tee /etc/systemd/system/bluetooth.service.d/experimental.conf << EOF
+[Service]
+ExecStart=
+ExecStart=/usr/lib/bluetooth/bluetoothd --experimental
+EOF
+
+# Configure thread safety
+sudo tee /etc/profile.d/bluealsa.sh << EOF
+export LIBASOUND_THREAD_SAFE=0
+EOF
+source /etc/profile.d/bluealsa.sh
 
 echo -e "\n${GREEN}Installation complete!${NC}"
 echo -e "\nNext steps:"
