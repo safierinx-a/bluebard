@@ -88,22 +88,41 @@ class BluetoothInterface:
     async def _setup_agent(self):
         """Configure Bluetooth agent for pairing"""
         try:
+            # Use async subprocess for better error handling
             # Remove existing agents
-            subprocess.run(
-                ["bluetoothctl", "agent", "off"], check=True, capture_output=True
+            proc = await asyncio.create_subprocess_exec(
+                "bluetoothctl",
+                "agent",
+                "off",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            await proc.communicate()
 
             # Set up DisplayOnly agent for PIN code pairing
-            subprocess.run(
-                ["bluetoothctl", "agent", "DisplayOnly"],
-                check=True,
-                capture_output=True,
+            proc = await asyncio.create_subprocess_exec(
+                "bluetoothctl",
+                "agent",
+                "DisplayOnly",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                self.logger.error(f"Failed to set agent mode: {stderr.decode()}")
+                return False
 
             # Set as default
-            subprocess.run(
-                ["bluetoothctl", "default-agent"], check=True, capture_output=True
+            proc = await asyncio.create_subprocess_exec(
+                "bluetoothctl",
+                "default-agent",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                self.logger.error(f"Failed to set default agent: {stderr.decode()}")
+                return False
 
             return True
         except Exception as e:

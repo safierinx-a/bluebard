@@ -48,6 +48,7 @@ done
 REQUIRED_PACKAGES=(
     "bluez"              # Base Bluetooth stack
     "bluez-alsa-utils"   # BlueALSA utilities
+    "bluez-tools"        # Includes bt-agent
     "libasound2-plugins" # ALSA plugins including BlueALSA
     "python3-pip"        # Python package manager
     "libdbus-1-dev"      # D-Bus development files
@@ -281,7 +282,7 @@ done
 echo "Configuring Bluetooth..."
 
 # Set up Bluetooth agent
-cat > /etc/bluetooth/main.conf << EOF
+sudo tee /etc/bluetooth/main.conf << EOF
 [General]
 DiscoverableTimeout = 0
 Discoverable = true
@@ -296,7 +297,7 @@ ReconnectIntervals = 1,2,4
 EOF
 
 # Configure authentication agent
-cat > /etc/systemd/system/bt-agent.service << EOF
+sudo tee /etc/systemd/system/bt-agent.service << EOF
 [Unit]
 Description=Bluetooth Auth Agent
 After=bluetooth.service
@@ -312,11 +313,11 @@ WantedBy=multi-user.target
 EOF
 
 # Enable and start agent
-systemctl enable bt-agent
-systemctl start bt-agent
+sudo systemctl enable bt-agent
+sudo systemctl start bt-agent
 
 # Configure BlueALSA
-systemctl restart bluetooth
+sudo systemctl restart bluetooth
 check_status "Bluetooth configuration"
 
 # Test Bluetooth audio
