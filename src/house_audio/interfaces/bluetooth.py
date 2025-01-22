@@ -22,7 +22,7 @@ class BluetoothInterface:
             await self._verify_bluealsa()
 
             # Make discoverable
-            await self._set_discoverable(True)
+            await self.set_discoverable(True)
 
             # Get initial device list
             await self.scan_devices()
@@ -46,7 +46,7 @@ class BluetoothInterface:
                     pass
 
             # Turn off discoverable
-            await self._set_discoverable(False)
+            await self.set_discoverable(False)
 
             # Disconnect devices
             active = await self.get_active_devices()
@@ -82,7 +82,7 @@ class BluetoothInterface:
             self.logger.error(f"BlueALSA verification failed: {e}")
             raise
 
-    async def _set_discoverable(self, enabled: bool):
+    async def set_discoverable(self, enabled: bool):
         """Set discoverable mode"""
         try:
             mode = "on" if enabled else "off"

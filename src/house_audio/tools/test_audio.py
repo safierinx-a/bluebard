@@ -201,6 +201,9 @@ class AudioTester:
         """Clean up resources"""
         # Reset all volumes
         for output in self.outputs:
+            # Skip HDMI if no control
+            if "hdmi" in self.outputs[output]["card_name"].lower():
+                continue
             try:
                 await self.set_output_volume(output, 0)
             except Exception as e:
