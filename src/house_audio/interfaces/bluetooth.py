@@ -93,9 +93,9 @@ class BluetoothInterface:
                 ["bluetoothctl", "agent", "off"], check=True, capture_output=True
             )
 
-            # Set up NoInputNoOutput agent
+            # Set up DisplayOnly agent for PIN code pairing
             subprocess.run(
-                ["bluetoothctl", "agent", "NoInputNoOutput"],
+                ["bluetoothctl", "agent", "DisplayOnly"],
                 check=True,
                 capture_output=True,
             )
@@ -196,6 +196,14 @@ class BluetoothInterface:
     async def connect_device(self, mac: str) -> bool:
         """Connect to a Bluetooth device"""
         try:
+            # Set up notification monitoring
+            proc_notify = await asyncio.create_subprocess_exec(
+                "bluetoothctl",
+                "--monitor",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
             # Remove device if previously paired
             subprocess.run(
                 ["bluetoothctl", "remove", mac], check=True, capture_output=True
@@ -206,14 +214,43 @@ class BluetoothInterface:
                 ["bluetoothctl", "trust", mac], check=True, capture_output=True
             )
 
-            # Pair device
-            subprocess.run(
-                ["bluetoothctl", "pair", mac], check=True, capture_output=True
+            # Pair device with timeout
+            proc = await asyncio.create_subprocess_exec(
+                "bluetoothctl",
+                "pair",
+                mac,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+
+            # Monitor for pairing events
+            while True:
+                if proc_notify.stdout:
+                    line = await proc_notify.stdout.readline()
+                    if b"Pairing successful" in line:
+                        self.logger.info(f"Successfully paired with {mac}")
+                        break
+                    elif b"Failed to pair" in line:
+                        self.logger.error(f"Failed to pair with {mac}")
+                        return False
+
+            # Wait for pairing with timeout
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=30.0
+                )
+                if proc.returncode != 0:
+                    self.logger.error(f"Pairing failed: {stderr.decode()}")
+                    return False
+            except asyncio.TimeoutError:
+                self.logger.error("Pairing timed out")
+                return False
 
             # Connect
             result = subprocess.run(
-                ["bluetoothctl", "connect", mac], capture_output=True, text=True
+                ["bluetoothctl", "connect", mac],
+                capture_output=True,
+                text=True,
             )
 
             if "Connection successful" in result.stdout:

@@ -285,6 +285,10 @@ cat > /etc/bluetooth/main.conf << EOF
 [General]
 DiscoverableTimeout = 0
 Discoverable = true
+Name = House Audio
+# Enable SSP (Secure Simple Pairing)
+SSPCapability = true
+
 [Policy]
 AutoEnable = true
 ReconnectAttempts = 3
@@ -299,7 +303,9 @@ After=bluetooth.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/bt-agent -c NoInputNoOutput
+# Use DisplayOnly agent for PIN code display
+ExecStart=/usr/bin/bt-agent -c DisplayOnly
+Environment=DISPLAY=:0
 
 [Install]
 WantedBy=multi-user.target
