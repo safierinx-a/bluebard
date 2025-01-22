@@ -279,23 +279,38 @@ done
 
 # Configure Bluetooth
 echo "Configuring Bluetooth..."
-# Set friendly name based on hostname
-HOSTNAME=$(hostname)
-BT_NAME="House Audio (${HOSTNAME})"
 
-# Configure Bluetooth step by step
-bluetoothctl power on
-bluetoothctl discoverable on
-bluetoothctl discoverable-timeout 0
-bluetoothctl pairable on
-# Set up agent properly
-bluetoothctl agent off
-bluetoothctl agent on
-bluetoothctl default-agent
-# Set friendly name
-bluetoothctl system-alias "${BT_NAME}"
-# Trust all devices
-bluetoothctl agent NoInputNoOutput
+# Set up Bluetooth agent
+cat > /etc/bluetooth/main.conf << EOF
+[General]
+DiscoverableTimeout = 0
+Discoverable = true
+[Policy]
+AutoEnable = true
+ReconnectAttempts = 3
+ReconnectIntervals = 1,2,4
+EOF
+
+# Configure authentication agent
+cat > /etc/systemd/system/bt-agent.service << EOF
+[Unit]
+Description=Bluetooth Auth Agent
+After=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bt-agent -c NoInputNoOutput
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start agent
+systemctl enable bt-agent
+systemctl start bt-agent
+
+# Configure BlueALSA
+systemctl restart bluetooth
 check_status "Bluetooth configuration"
 
 # Test Bluetooth audio

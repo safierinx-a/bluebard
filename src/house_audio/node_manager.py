@@ -14,6 +14,7 @@ class NodeManager:
         self.bluetooth = BluetoothInterface()
         self.state: Dict = {}
         self._running = False
+        self.default_output = "default"  # Assuming a default output device
 
     async def start(self):
         """Start the node manager"""
@@ -83,3 +84,24 @@ class NodeManager:
         if success:
             await self._update_state()
         return success
+
+    async def handle_bluetooth_device(self, mac: str, action: str) -> bool:
+        """Handle Bluetooth device connection/disconnection"""
+        try:
+            if action == "connect":
+                if await self.bluetooth.connect_device(mac):
+                    # Wait for device to stabilize
+                    await asyncio.sleep(2)
+                    # Create audio route
+                    route_id = await self.audio.create_bluetooth_route(
+                        mac, self.default_output
+                    )
+                    # Set initial volume
+                    await self.audio.set_volume(self.default_output, 0.7)
+                    return True
+            elif action == "disconnect":
+                return await self.bluetooth.disconnect_device(mac)
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to handle device {mac}: {e}")
+            return False

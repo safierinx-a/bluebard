@@ -21,6 +21,9 @@ class BluetoothInterface:
             # Verify bluealsa is running
             await self._verify_bluealsa()
 
+            # Set up pairing agent
+            await self._setup_agent()
+
             # Make discoverable
             await self.set_discoverable(True)
 
@@ -81,6 +84,31 @@ class BluetoothInterface:
         except Exception as e:
             self.logger.error(f"BlueALSA verification failed: {e}")
             raise
+
+    async def _setup_agent(self):
+        """Configure Bluetooth agent for pairing"""
+        try:
+            # Remove existing agents
+            subprocess.run(
+                ["bluetoothctl", "agent", "off"], check=True, capture_output=True
+            )
+
+            # Set up NoInputNoOutput agent
+            subprocess.run(
+                ["bluetoothctl", "agent", "NoInputNoOutput"],
+                check=True,
+                capture_output=True,
+            )
+
+            # Set as default
+            subprocess.run(
+                ["bluetoothctl", "default-agent"], check=True, capture_output=True
+            )
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to setup agent: {e}")
+            return False
 
     async def set_discoverable(self, enabled: bool):
         """Set discoverable mode"""
@@ -168,19 +196,27 @@ class BluetoothInterface:
     async def connect_device(self, mac: str) -> bool:
         """Connect to a Bluetooth device"""
         try:
-            # Trust device first
-            proc = await asyncio.create_subprocess_exec(
-                "bluetoothctl", "trust", mac, stdout=asyncio.subprocess.PIPE
+            # Remove device if previously paired
+            subprocess.run(
+                ["bluetoothctl", "remove", mac], check=True, capture_output=True
             )
-            await proc.communicate()
+
+            # Trust device first
+            subprocess.run(
+                ["bluetoothctl", "trust", mac], check=True, capture_output=True
+            )
+
+            # Pair device
+            subprocess.run(
+                ["bluetoothctl", "pair", mac], check=True, capture_output=True
+            )
 
             # Connect
-            proc = await asyncio.create_subprocess_exec(
-                "bluetoothctl", "connect", mac, stdout=asyncio.subprocess.PIPE
+            result = subprocess.run(
+                ["bluetoothctl", "connect", mac], capture_output=True, text=True
             )
-            stdout, _ = await proc.communicate()
 
-            if b"Connection successful" in stdout:
+            if "Connection successful" in result.stdout:
                 if mac in self.audio_devices:
                     self.audio_devices[mac]["connected"] = True
                 return True

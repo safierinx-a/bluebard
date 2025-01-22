@@ -215,11 +215,12 @@ class AudioInterface:
     def _generate_bluealsa_config(self, bt_mac: str) -> str:
         """Generate BlueALSA PCM configuration"""
         return f"""
-        pcm.bluealsa_{bt_mac.replace(":", "_")} {{
+        pcm.{bt_mac.replace(":", "_")} {{
             type bluealsa
             device "{bt_mac}"
             profile "a2dp"
             interface "hci0"
+            delay 10000  # Add delay to prevent audio glitches
         }}
         """
 
