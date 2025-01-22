@@ -90,16 +90,16 @@ class AudioInterface:
                 current_card = {
                     "id": int(card_match.group(1)),
                     "name": card_match.group(2),
-                    "devices": [],
                 }
 
-            device_match = re.match(r"  Subdevice #(\d+)", line)
+            # Only include main device outputs
+            device_match = re.match(r"  Subdevice #0", line)
             if device_match and current_card:
-                device_id = f"hw:{current_card['id']},{device_match.group(1)}"
+                device_id = f"hw:{current_card['id']},0"  # Always use first subdevice
                 devices[device_id] = {
                     "card_id": current_card["id"],
                     "card_name": current_card["name"],
-                    "device_id": int(device_match.group(1)),
+                    "device_id": 0,  # Always use first subdevice
                     "device_string": device_id,
                 }
 
@@ -226,11 +226,17 @@ class AudioInterface:
     async def get_volume(self, device: str) -> Optional[float]:
         """Get volume for a device"""
         try:
+            # Parse card number from hw:X,Y format
+            if match := re.match(r"hw:(\d+),\d+", device):
+                card = match.group(1)
+            else:
+                raise ValueError(f"Invalid device format: {device}")
+
             # Try different control names
             for control in ["PCM", "Headphone", "Speaker", "Master"]:
                 try:
                     result = subprocess.run(
-                        ["amixer", "-D", device, "sget", control],
+                        ["amixer", "-c", card, "sget", control],
                         capture_output=True,
                         text=True,
                         check=True,
@@ -251,14 +257,31 @@ class AudioInterface:
             raise ValueError("Volume must be between 0.0 and 1.0")
 
         try:
-            # Try different control names
-            for control in ["PCM", "Headphone", "Speaker", "Master"]:
+            # Parse card number and get device type
+            if match := re.match(r"hw:(\d+),\d+", device):
+                card = match.group(1)
+                card_name = self.devices[device]["card_name"].lower()
+            else:
+                raise ValueError(f"Invalid device format: {device}")
+
+            # Select controls based on device type
+            if "hdmi" in card_name:
+                controls = ["PCM"]
+            elif "headphones" in card_name:
+                controls = ["Headphone"]
+            elif "usb" in card_name:
+                controls = ["Speaker", "PCM"]
+            else:
+                controls = ["PCM", "Headphone", "Speaker", "Master"]
+
+            # Try device-specific controls
+            for control in controls:
                 try:
                     subprocess.run(
                         [
                             "amixer",
-                            "-D",
-                            device,
+                            "-c",
+                            card,
                             "sset",
                             control,
                             f"{int(volume * 100)}%",
