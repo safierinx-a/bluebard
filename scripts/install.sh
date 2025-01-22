@@ -253,22 +253,46 @@ sudo tee /etc/systemd/system/bluealsa.service << EOF
 Description=BluezALSA proxy
 Requires=bluetooth.service
 After=bluetooth.service
+PartOf=bluetooth.service
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/bluealsa -p a2dp-sink
+ExecStart=/usr/bin/bluealsa -p a2dp-sink -p a2dp-source
+ExecStartPre=/bin/sleep 2
 Restart=on-failure
+RestartSec=5
+TimeoutStartSec=10
+
+[Install]
+WantedBy=multi-user.target
+Also=bluealsa-aplay.service
+EOF
+
+# Set up BlueALSA player service
+sudo tee /etc/systemd/system/bluealsa-aplay.service << EOF
+[Unit]
+Description=BlueALSA aplay service
+Requires=bluealsa.service
+After=bluealsa.service
+PartOf=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/bluealsa-aplay --pcm-buffer-time=250000 00:00:00:00:00:00
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-check_status "Service configuration"
 
 # Enable and start services
 echo "Starting services..."
 sudo systemctl daemon-reload
-SERVICES=("bluetooth" "bluealsa")
+SERVICES=("bluetooth" "bluealsa" "bluealsa-aplay")
 if [ "$INSTALL_MODE" = "multi-room" ]; then
     SERVICES+=("snapclient")
 fi

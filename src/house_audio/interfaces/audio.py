@@ -40,14 +40,30 @@ class AudioInterface:
 
     async def _verify_services(self):
         """Verify required services are running"""
-        services = ["bluetooth", "bluealsa", "snapclient"]
+        services = ["bluetooth", "bluealsa", "bluealsa-aplay"]
         for service in services:
             proc = await asyncio.create_subprocess_exec(
                 "systemctl", "is-active", service, stdout=asyncio.subprocess.PIPE
             )
             stdout, _ = await proc.communicate()
             if proc.returncode != 0:
-                raise RuntimeError(f"Service {service} not running")
+                # Try to restart the service
+                restart_proc = await asyncio.create_subprocess_exec(
+                    "sudo",
+                    "systemctl",
+                    "restart",
+                    service,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await restart_proc.communicate()
+                # Check again
+                proc = await asyncio.create_subprocess_exec(
+                    "systemctl", "is-active", service, stdout=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Service {service} not running")
 
     async def discover_devices(self) -> Dict[str, Dict]:
         """Discover available audio devices"""
