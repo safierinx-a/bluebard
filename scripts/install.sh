@@ -49,6 +49,7 @@ REQUIRED_PACKAGES=(
     "bluez"              # Base Bluetooth stack
     "bluez-alsa-utils"   # BlueALSA utilities
     "bluez-tools"        # Includes bt-agent
+    "bluez-hid2hci"      # HID to HCI conversion tool
     "libasound2-dev"     # ALSA development files
     "libbluetooth-dev"   # Bluetooth development files
     "libasound2-plugins" # ALSA plugins including BlueALSA
@@ -399,20 +400,31 @@ check_status "Python package installation"
 
 # Enable experimental features
 # Find bluetoothd path
-BLUETOOTHD_PATH=""
-for path in "/usr/sbin/bluetoothd" "/usr/lib/bluetooth/bluetoothd" "/usr/libexec/bluetooth/bluetoothd"; do
-    if [ -x "$path" ]; then
-        BLUETOOTHD_PATH="$path"
-        break
-    fi
-done
+BLUETOOTHD_PATH=$(which bluetoothd)
+if [ -z "$BLUETOOTHD_PATH" ]; then
+    echo "Checking alternative locations..."
+    for path in "/usr/sbin/bluetoothd" "/usr/lib/bluetooth/bluetoothd" "/usr/libexec/bluetooth/bluetoothd"; do
+        if [ -x "$path" ]; then
+            BLUETOOTHD_PATH="$path"
+            break
+        fi
+    done
+fi
 
 if [ -z "$BLUETOOTHD_PATH" ]; then
     echo -e "${RED}Error: bluetoothd not found${NC}"
-    echo "Checking bluetooth package..."
-    dpkg -L bluez | grep bluetoothd
-    exit 1
+    echo "Checking package installation..."
+    dpkg -l | grep bluez
+    echo "Trying to reinstall bluez..."
+    sudo apt-get install --reinstall bluez
+    BLUETOOTHD_PATH=$(which bluetoothd)
+    if [ -z "$BLUETOOTHD_PATH" ]; then
+        echo -e "${RED}Failed to locate bluetoothd after reinstall${NC}"
+        exit 1
+    fi
 fi
+
+echo "Found bluetoothd at: ${BLUETOOTHD_PATH}"
 
 # Stop all services first
 echo "Stopping services..."
@@ -420,41 +432,29 @@ sudo systemctl stop bluealsa-aplay bluetooth bluealsa bt-agent
 
 # Clean up any existing configuration
 sudo rm -f /etc/systemd/system/bluetooth.service.d/experimental.conf
+sudo rm -f /etc/systemd/system/bluetooth.service.d/override.conf
 
-# Get original service file for reference
-ORIG_SERVICE=$(systemctl cat bluetooth.service | grep ExecStart= | tail -n1 | cut -d= -f2-)
-if [ -z "$ORIG_SERVICE" ]; then
-    # Fallback to common paths
-    for path in "/usr/sbin/bluetoothd" "/usr/lib/bluetooth/bluetoothd" "/usr/libexec/bluetooth/bluetoothd"; do
-        if [ -x "$path" ]; then
-            ORIG_SERVICE="$path"
-            break
-        fi
-    done
-fi
-
-if [ -z "$ORIG_SERVICE" ]; then
-    echo -e "${RED}Error: Could not determine bluetoothd path${NC}"
-    echo "Checking bluetooth package..."
-    dpkg -L bluez | grep bluetoothd
-    exit 1
-fi
+# Clean up bluetooth directory
+sudo rm -rf /etc/bluetooth
+sudo mkdir -p /etc/bluetooth
+sudo chmod 755 /etc/bluetooth
+sudo chown -R root:root /etc/bluetooth
 
 sudo mkdir -p /etc/systemd/system/bluetooth.service.d
 sudo tee /etc/systemd/system/bluetooth.service.d/experimental.conf << EOF
 [Service]
 ExecStart=
-ExecStart=${ORIG_SERVICE} --experimental
+ExecStart=${BLUETOOTHD_PATH} --experimental
 Environment=LIBASOUND_THREAD_SAFE=0
 EOF
-
-# Fix bluetooth directory permissions
-sudo chmod 755 /etc/bluetooth
-sudo chown -R root:root /etc/bluetooth
 
 # Reload systemd and restart bluetooth
 sudo systemctl daemon-reload
 sudo systemctl reset-failed bluetooth
+sudo systemctl stop bluetooth
+sleep 2
+sudo systemctl enable bluetooth
+sleep 1
 sudo systemctl restart bluetooth
 sleep 2  # Give it time to start
 
@@ -463,9 +463,11 @@ if ! systemctl is-active --quiet bluetooth; then
     echo -e "${RED}Bluetooth service failed to start${NC}"
     echo "Checking logs..."
     journalctl -u bluetooth -n 50
-    echo "Original service: ${ORIG_SERVICE}"
+    echo "Bluetoothd path: ${BLUETOOTHD_PATH}"
     echo "Current status:"
     systemctl status bluetooth
+    echo "Checking service file:"
+    systemctl cat bluetooth
     exit 1
 fi
 
