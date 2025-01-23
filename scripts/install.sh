@@ -290,14 +290,32 @@ EOF
 # Enable and start services in correct order
 echo "Starting services..."
 sudo systemctl daemon-reload
+
+# Stop all services first
+sudo systemctl stop bluealsa-aplay bluetooth bluealsa bt-agent
+
 # Start services with proper delays
+sudo systemctl enable bluetooth
 sudo systemctl restart bluetooth
 sleep 2
+sudo systemctl enable bt-agent
 sudo systemctl restart bt-agent
 sleep 2
+sudo systemctl enable bluealsa
 sudo systemctl restart bluealsa
 sleep 2
+sudo systemctl enable bluealsa-aplay
 sudo systemctl restart bluealsa-aplay
+
+# Verify services
+for service in bluetooth bt-agent bluealsa bluealsa-aplay; do
+    if ! systemctl is-active --quiet $service; then
+        echo -e "${RED}Service $service failed to start${NC}"
+        echo "Checking logs..."
+        journalctl -u $service -n 50
+        exit 1
+    fi
+done
 
 # Configure Bluetooth
 echo "Configuring Bluetooth..."
@@ -309,12 +327,13 @@ DiscoverableTimeout=0
 Class=0x200414  # Audio device
 Name=House Audio
 Discoverable=true
-# Pairing options
-Privacy=off
-JustWorksRepairing=always
+ControllerMode=dual
+FastConnectable=true
 
-[GATT]
-Cache=always
+[LE]
+MinConnectionInterval=7.5
+MaxConnectionInterval=15
+ConnectionLatency=0
 
 [Policy]
 AutoEnable=true
@@ -379,18 +398,75 @@ fi
 check_status "Python package installation"
 
 # Enable experimental features
+# Find bluetoothd path
+BLUETOOTHD_PATH=""
+for path in "/usr/sbin/bluetoothd" "/usr/lib/bluetooth/bluetoothd" "/usr/libexec/bluetooth/bluetoothd"; do
+    if [ -x "$path" ]; then
+        BLUETOOTHD_PATH="$path"
+        break
+    fi
+done
+
+if [ -z "$BLUETOOTHD_PATH" ]; then
+    echo -e "${RED}Error: bluetoothd not found${NC}"
+    echo "Checking bluetooth package..."
+    dpkg -L bluez | grep bluetoothd
+    exit 1
+fi
+
+# Stop all services first
+echo "Stopping services..."
+sudo systemctl stop bluealsa-aplay bluetooth bluealsa bt-agent
+
+# Clean up any existing configuration
+sudo rm -f /etc/systemd/system/bluetooth.service.d/experimental.conf
+
 sudo mkdir -p /etc/systemd/system/bluetooth.service.d
 sudo tee /etc/systemd/system/bluetooth.service.d/experimental.conf << EOF
 [Service]
 ExecStart=
-ExecStart=/usr/lib/bluetooth/bluetoothd --experimental
+ExecStart=${BLUETOOTHD_PATH} --experimental
+Environment=LIBASOUND_THREAD_SAFE=0
 EOF
 
-# Configure thread safety
-sudo tee /etc/profile.d/bluealsa.sh << EOF
-export LIBASOUND_THREAD_SAFE=0
-EOF
-source /etc/profile.d/bluealsa.sh
+# Fix bluetooth directory permissions
+sudo chmod 755 /etc/bluetooth
+
+# Reload systemd and restart bluetooth
+sudo systemctl daemon-reload
+sudo systemctl stop bluetooth
+sudo systemctl restart bluetooth
+sleep 2  # Give it time to start
+
+# Verify bluetooth service
+if ! systemctl is-active --quiet bluetooth; then
+    echo -e "${RED}Bluetooth service failed to start${NC}"
+    echo "Checking logs..."
+    journalctl -u bluetooth -n 50
+    echo "Checking bluetoothd path: ${BLUETOOTHD_PATH}"
+    ls -l ${BLUETOOTHD_PATH}
+    exit 1
+fi
+
+# Start other services in order
+echo "Starting services..."
+sudo systemctl restart bt-agent
+sleep 2
+sudo systemctl restart bluealsa
+sleep 2
+sudo systemctl restart bluealsa-aplay
+sleep 2
+
+# Final verification
+for service in bluetooth bt-agent bluealsa bluealsa-aplay; do
+    if ! systemctl is-active --quiet $service; then
+        echo -e "${RED}Service $service failed to start${NC}"
+        echo "Checking logs..."
+        journalctl -u $service -n 50
+        exit 1
+    fi
+    echo -e "${GREEN}✓ $service started${NC}"
+done
 
 echo -e "\n${GREEN}Installation complete!${NC}"
 echo -e "\nNext steps:"
