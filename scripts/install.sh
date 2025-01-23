@@ -421,20 +421,40 @@ sudo systemctl stop bluealsa-aplay bluetooth bluealsa bt-agent
 # Clean up any existing configuration
 sudo rm -f /etc/systemd/system/bluetooth.service.d/experimental.conf
 
+# Get original service file for reference
+ORIG_SERVICE=$(systemctl cat bluetooth.service | grep ExecStart= | tail -n1 | cut -d= -f2-)
+if [ -z "$ORIG_SERVICE" ]; then
+    # Fallback to common paths
+    for path in "/usr/sbin/bluetoothd" "/usr/lib/bluetooth/bluetoothd" "/usr/libexec/bluetooth/bluetoothd"; do
+        if [ -x "$path" ]; then
+            ORIG_SERVICE="$path"
+            break
+        fi
+    done
+fi
+
+if [ -z "$ORIG_SERVICE" ]; then
+    echo -e "${RED}Error: Could not determine bluetoothd path${NC}"
+    echo "Checking bluetooth package..."
+    dpkg -L bluez | grep bluetoothd
+    exit 1
+fi
+
 sudo mkdir -p /etc/systemd/system/bluetooth.service.d
 sudo tee /etc/systemd/system/bluetooth.service.d/experimental.conf << EOF
 [Service]
 ExecStart=
-ExecStart=${BLUETOOTHD_PATH} --experimental
+ExecStart=${ORIG_SERVICE} --experimental
 Environment=LIBASOUND_THREAD_SAFE=0
 EOF
 
 # Fix bluetooth directory permissions
 sudo chmod 755 /etc/bluetooth
+sudo chown -R root:root /etc/bluetooth
 
 # Reload systemd and restart bluetooth
 sudo systemctl daemon-reload
-sudo systemctl stop bluetooth
+sudo systemctl reset-failed bluetooth
 sudo systemctl restart bluetooth
 sleep 2  # Give it time to start
 
@@ -443,8 +463,9 @@ if ! systemctl is-active --quiet bluetooth; then
     echo -e "${RED}Bluetooth service failed to start${NC}"
     echo "Checking logs..."
     journalctl -u bluetooth -n 50
-    echo "Checking bluetoothd path: ${BLUETOOTHD_PATH}"
-    ls -l ${BLUETOOTHD_PATH}
+    echo "Original service: ${ORIG_SERVICE}"
+    echo "Current status:"
+    systemctl status bluetooth
     exit 1
 fi
 
