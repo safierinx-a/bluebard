@@ -57,9 +57,7 @@ run_as_root apt-get remove --purge -y \
     libpulse* \
     bluealsa \
     bluealsa-* \
-    bluez-alsa \
-    bluez-alsa-* \
-    libasound2-plugin-bluez
+    libasound2-plugin-bluez || true
 
 # Clean up old configurations and state
 echo "Cleaning up old configurations..."
@@ -71,11 +69,15 @@ run_as_root rm -rf \
     /var/lib/bluealsa \
     /etc/systemd/system/bluealsa.service \
     /etc/systemd/system/bluealsa-aplay.service
+
+# Clean up user-specific audio configurations
+echo "Cleaning up user configurations..."
+USER_HOME=$(getent passwd "$ACTUAL_USER" | cut -d: -f6)
 run_as_user rm -rf \
-    ~/.config/pulse \
-    ~/.pulse \
-    ~/.pulse-cookie \
-    ~/.config/systemd/user/pulseaudio*
+    "$USER_HOME/.config/pulse" \
+    "$USER_HOME/.pulse" \
+    "$USER_HOME/.pulse-cookie" \
+    "$USER_HOME/.config/systemd/user/pulseaudio"*
 
 # Update package lists
 echo "Updating package lists..."
