@@ -1,322 +1,476 @@
+#!/usr/bin/env python3
+
 import asyncio
 import subprocess
 from typing import Dict, List, Optional
 import logging
 import os
 import re
+import json
 
 
 class AudioInterface:
-    """Audio interface using BlueALSA and ALSA for audio routing"""
+    """Audio interface using PipeWire for modern audio routing"""
 
-    ASOUND_CONF = "/etc/asound.conf"
-
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
+    def __init__(self, mode: str = "standalone"):
+        self.logger = logging.getLogger("audio")
+        self.mode = mode
+        self.outputs = {}
         self.routes = {}
-        self.devices = {}
+        self.volumes = {}
 
     async def setup(self):
-        """Initialize audio system"""
+        """Initialize audio interface"""
         try:
-            # Check dependencies
-            self._check_dependencies()
-            # Verify services
+            # Verify PipeWire is running
             await self._verify_services()
-            # Discover devices
-            await self.discover_devices()
-        except Exception as e:
-            self.logger.error(f"Audio setup failed: {e}")
-            raise
 
-    def _check_dependencies(self):
-        """Verify required system components"""
-        required = ["bluealsa", "bluealsa-aplay", "snapclient", "aplay"]
-        for dep in required:
-            try:
-                subprocess.run(["which", dep], check=True, capture_output=True)
-            except subprocess.CalledProcessError:
-                raise RuntimeError(f"Missing dependency: {dep}")
-
-    async def _verify_services(self):
-        """Verify required services are running"""
-        services = ["bluetooth", "bluealsa", "bluealsa-aplay"]
-        for service in services:
+            # Initialize PipeWire connection
             proc = await asyncio.create_subprocess_exec(
-                "systemctl", "is-active", service, stdout=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await proc.communicate()
-            if proc.returncode != 0:
-                # Try to restart the service
-                restart_proc = await asyncio.create_subprocess_exec(
-                    "sudo",
-                    "systemctl",
-                    "restart",
-                    service,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                await restart_proc.communicate()
-                # Check again
-                proc = await asyncio.create_subprocess_exec(
-                    "systemctl", "is-active", service, stdout=asyncio.subprocess.PIPE
-                )
-                stdout, _ = await proc.communicate()
-                if proc.returncode != 0:
-                    raise RuntimeError(f"Service {service} not running")
-
-    async def discover_devices(self) -> Dict[str, Dict]:
-        """Discover available audio devices"""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "aplay",
-                "-l",
+                "pw-cli",
+                "info",
+                "0",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
-
+            stdout, _ = await proc.communicate()
             if proc.returncode != 0:
-                raise RuntimeError(f"Failed to list ALSA devices: {stderr.decode()}")
+                raise RuntimeError("Failed to connect to PipeWire")
 
-            self.devices = self._parse_aplay_output(stdout.decode())
-
-            # Get current volumes
-            for device_id in self.devices:
-                try:
-                    volume = await self.get_volume(device_id)
-                    self.devices[device_id]["volume"] = volume
-                except Exception:
-                    self.devices[device_id]["volume"] = None
-
-            return self.devices
+            # Discover devices
+            await self.discover_devices()
 
         except Exception as e:
-            self.logger.error(f"Device discovery failed: {e}")
+            self.logger.error(f"Setup failed: {e}")
             raise
 
-    def _parse_aplay_output(self, output: str) -> Dict[str, Dict]:
-        """Parse aplay -l output into device dictionary"""
+    async def discover_devices(self) -> Dict:
+        """Discover available audio devices"""
         devices = {}
-        current_card = None
+        retry_count = 3
 
-        for line in output.split("\n"):
-            card_match = re.match(r"card (\d+).*?\[(.*?)\]", line)
-            if card_match:
-                current_card = {
-                    "id": int(card_match.group(1)),
-                    "name": card_match.group(2),
-                }
+        while retry_count > 0:
+            try:
+                # Get PipeWire sinks
+                proc = await asyncio.create_subprocess_exec(
+                    "pw-dump",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
 
-            # Only include main device outputs
-            device_match = re.match(r"  Subdevice #0", line)
-            if device_match and current_card:
-                device_id = f"hw:{current_card['id']},0"  # Always use first subdevice
-                devices[device_id] = {
-                    "card_id": current_card["id"],
-                    "card_name": current_card["name"],
-                    "device_id": 0,  # Always use first subdevice
-                    "device_string": device_id,
-                }
+                # Parse JSON output
+                nodes = json.loads(stdout.decode())
 
+                for node in nodes:
+                    if node.get("type") == "PipeWire:Interface:Node":
+                        info = node.get("info", {})
+                        props = info.get("props", {})
+
+                        # Only include audio sinks
+                        if props.get("media.class") == "Audio/Sink":
+                            device_id = str(node["id"])
+                            name = props.get(
+                                "node.description", props.get("node.name", device_id)
+                            )
+
+                            # Check audio channels
+                            channels = int(props.get("audio.channels", "2"))
+                            is_mono = channels == 1
+
+                            devices[device_id] = {
+                                "name": name,
+                                "type": "pipewire",
+                                "props": props,
+                                "channels": channels,
+                                "is_mono": is_mono,
+                                "format": props.get("audio.format", ""),
+                                "rate": int(props.get("audio.rate", "44100")),
+                            }
+
+                if devices:  # If we found devices, break the retry loop
+                    break
+
+                self.logger.warning("No audio devices found, retrying...")
+                retry_count -= 1
+                await asyncio.sleep(1)
+
+            except Exception as e:
+                self.logger.error(f"Device discovery failed: {e}")
+                retry_count -= 1
+                if retry_count > 0:
+                    await asyncio.sleep(1)
+                    continue
+                raise
+
+        self.outputs = devices
         return devices
 
-    async def create_route(
-        self, source: str, targets: List[str], volumes: Dict[str, float]
-    ) -> str:
-        """Create audio route with volumes"""
+    async def create_route(self, source: str, target: str) -> str:
+        """Create audio route using PipeWire"""
         try:
-            config = self._generate_route_config(source, targets, volumes)
-            route_id = f"route_{len(self.routes)}"
-            await self._update_alsa_config(route_id, config)
+            if target not in self.outputs:
+                raise ValueError(f"Unknown output: {target}")
+
+            # Create route ID
+            route_id = f"{source}->{target}"
+
+            # Get target device info
+            target_info = self.outputs[target]
+            is_mono = target_info.get("is_mono", False)
+
+            # Link Bluetooth source to target sink
+            links = []
+
+            # Left channel
+            proc = await asyncio.create_subprocess_exec(
+                "pw-link",
+                f"bluez_source.{source}:monitor_FL",
+                f"{target}:playback_FL",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            links.append(f"bluez_source.{source}:monitor_FL -> {target}:playback_FL")
+
+            # Right channel (if stereo)
+            if not is_mono:
+                proc = await asyncio.create_subprocess_exec(
+                    "pw-link",
+                    f"bluez_source.{source}:monitor_FR",
+                    f"{target}:playback_FR",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+                links.append(
+                    f"bluez_source.{source}:monitor_FR -> {target}:playback_FR"
+                )
+
+            # For mono devices, mix down stereo to mono
+            elif is_mono:
+                self.logger.info(
+                    f"Mono device detected: {target}, mixing stereo to mono"
+                )
+                # The right channel is automatically mixed by PipeWire
 
             self.routes[route_id] = {
                 "source": source,
-                "targets": targets,
-                "volumes": volumes,
+                "outputs": [target],
+                "links": links,
+                "is_mono": is_mono,
             }
+
             return route_id
 
         except Exception as e:
             self.logger.error(f"Failed to create route: {e}")
             raise
 
-    def _generate_route_config(
-        self, source: str, targets: List[str], volumes: Dict[str, float]
-    ) -> str:
-        """Generate ALSA config for routing"""
-        config = [
-            f"""
-        pcm.{source} {{
-            type bluealsa
-            device "{source}"
-            profile "a2dp"
-            interface "hci0"
-        }}
-        
-        # Multi-device output
-        pcm.multi_out {{
-            type plug
-            slave.pcm {{
-                type multi
-                slaves {{
-        """
-        ]
-
-        # Add each target
-        for i, target in enumerate(targets):
-            volume = volumes.get(target, 1.0)
-            config.append(f"""
-                    {i} {{
-                        pcm "hw:{target}"
-                        volume {volume}
-                    }}
-            """)
-
-        # Complete the config
-        config.append("""
-                }
-            }
-        }
-        """)
-
-        return "\n".join(config)
-
-    async def _update_alsa_config(self, route_id: str, config: str):
-        """Update ALSA configuration"""
+    async def verify_route(self, route_id: str) -> bool:
+        """Verify route is working correctly"""
         try:
-            # Backup existing config
-            if os.path.exists(self.ASOUND_CONF):
-                await asyncio.create_subprocess_exec(
-                    "cp", self.ASOUND_CONF, f"{self.ASOUND_CONF}.bak"
+            route = self.routes.get(route_id)
+            if not route:
+                return False
+
+            # Check each link
+            for link in route["links"]:
+                source, target = link.split(" -> ")
+                proc = await asyncio.create_subprocess_exec(
+                    "pw-link",
+                    "-l",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
+                stdout, _ = await proc.communicate()
 
-            # Write new config
-            async with open(self.ASOUND_CONF, "w") as f:
-                await f.write(config)
+                if link not in stdout.decode():
+                    self.logger.error(f"Link verification failed: {link}")
+                    return False
 
-            # Test config
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Route verification failed: {e}")
+            return False
+
+    async def repair_route(self, route_id: str) -> bool:
+        """Attempt to repair a broken route"""
+        try:
+            route = self.routes.get(route_id)
+            if not route:
+                return False
+
+            # Remove existing links
+            await self._remove_route_links(route)
+
+            # Recreate the route
+            source = route["source"]
+            target = route["outputs"][0]
+            new_route_id = await self.create_route(source, target)
+
+            # Add additional outputs if any
+            for output in route["outputs"][1:]:
+                await self.add_output_to_route(source, output)
+
+            return await self.verify_route(new_route_id)
+
+        except Exception as e:
+            self.logger.error(f"Route repair failed: {e}")
+            return False
+
+    async def _remove_route_links(self, route: Dict):
+        """Remove all links for a route"""
+        for link in route.get("links", []):
+            try:
+                source, target = link.split(" -> ")
+                proc = await asyncio.create_subprocess_exec(
+                    "pw-link",
+                    "-d",
+                    source,
+                    target,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+            except Exception as e:
+                self.logger.error(f"Failed to remove link {link}: {e}")
+
+    async def add_output_to_route(self, source: str, new_target: str):
+        """Add another output to an existing route"""
+        route_id = next(
+            (rid for rid in self.routes if rid.startswith(f"{source}->")), None
+        )
+        if not route_id:
+            raise ValueError(f"No existing route for source {source}")
+
+        route = self.routes[route_id]
+        if new_target in route["outputs"]:
+            return  # Already added
+
+        try:
+            # Create additional links
             proc = await asyncio.create_subprocess_exec(
-                "alsactl",
-                "restore",
+                "pw-link",
+                f"bluez_source.{source}:monitor_FL",
+                f"{new_target}:playback_FL",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                raise RuntimeError(f"ALSA config error: {stderr.decode()}")
+            await proc.communicate()
+
+            proc = await asyncio.create_subprocess_exec(
+                "pw-link",
+                f"bluez_source.{source}:monitor_FR",
+                f"{new_target}:playback_FR",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+
+            # Update route info
+            route["outputs"].append(new_target)
+            route["links"].extend(
+                [
+                    f"bluez_source.{source}:monitor_FL -> {new_target}:playback_FL",
+                    f"bluez_source.{source}:monitor_FR -> {new_target}:playback_FR",
+                ]
+            )
 
         except Exception as e:
-            self.logger.error(f"Failed to update ALSA config: {e}")
-            # Restore backup if exists
-            if os.path.exists(f"{self.ASOUND_CONF}.bak"):
-                os.rename(f"{self.ASOUND_CONF}.bak", self.ASOUND_CONF)
+            self.logger.error(f"Failed to add output to route: {e}")
             raise
 
-    async def create_bluetooth_route(self, bt_mac: str, target_id: str) -> str:
-        """Create route from Bluetooth device to audio output"""
-        try:
-            # Generate BlueALSA PCM config
-            config = self._generate_bluealsa_config(bt_mac)
-
-            # Add route to target
-            route_id = await self.create_route(bt_mac, [target_id], {target_id: 1.0})
-
-            return route_id
-
-        except Exception as e:
-            self.logger.error(f"Failed to create Bluetooth route: {e}")
-            raise
-
-    def _generate_bluealsa_config(self, bt_mac: str) -> str:
-        """Generate BlueALSA PCM configuration"""
-        return f"""
-        pcm.{bt_mac.replace(":", "_")} {{
-            type bluealsa
-            device "{bt_mac}"
-            profile "a2dp"
-            interface "hci0"
-            delay 10000  # Add delay to prevent audio glitches
-        }}
-        """
-
-    async def get_volume(self, device: str) -> Optional[float]:
-        """Get volume for a device"""
-        try:
-            # Parse card number from hw:X,Y format
-            if match := re.match(r"hw:(\d+),\d+", device):
-                card = match.group(1)
-            else:
-                raise ValueError(f"Invalid device format: {device}")
-
-            # Try different control names
-            for control in ["PCM", "Headphone", "Speaker", "Master"]:
-                try:
-                    result = subprocess.run(
-                        ["amixer", "-c", card, "sget", control],
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    )
-                    # Parse volume from output
-                    if match := re.search(r"(\d+)%", result.stdout):
-                        return float(match.group(1)) / 100
-                except subprocess.CalledProcessError:
-                    continue
-            return None
-        except Exception as e:
-            logging.error(f"Failed to get volume for {device}: {e}")
-            return None
-
-    async def set_volume(self, device: str, volume: float) -> bool:
-        """Set volume for a device (0.0 to 1.0)"""
+    async def set_volume(self, device: str, volume: float):
+        """Set volume using PipeWire"""
         if not 0 <= volume <= 1:
-            raise ValueError("Volume must be between 0.0 and 1.0")
+            raise ValueError("Volume must be between 0 and 1")
 
         try:
-            # Parse card number and get device type
-            if match := re.match(r"hw:(\d+),\d+", device):
-                card = match.group(1)
-                card_name = self.devices[device]["card_name"].lower()
-            else:
-                raise ValueError(f"Invalid device format: {device}")
+            # Try wpctl first (more reliable)
+            proc = await asyncio.create_subprocess_exec(
+                "wpctl",
+                "set-volume",
+                device,
+                str(volume),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
 
-            # Select controls based on device type
-            if "hdmi" in card_name:
-                controls = ["PCM"]
-            elif "headphones" in card_name:
-                controls = ["Headphone"]
-            elif "usb" in card_name:
-                controls = ["Speaker", "PCM"]
-            else:
-                controls = ["PCM", "Headphone", "Speaker", "Master"]
+            if proc.returncode == 0:
+                self.volumes[device] = volume
+                return
 
-            # Try device-specific controls
-            for control in controls:
-                try:
-                    subprocess.run(
-                        [
-                            "amixer",
-                            "-c",
-                            card,
-                            "sset",
-                            control,
-                            f"{int(volume * 100)}%",
-                        ],
-                        check=True,
-                        capture_output=True,
-                    )
-                    return True
-                except subprocess.CalledProcessError:
-                    continue
-            raise Exception(f"No valid volume control found for {device}")
+            # Fallback to pw-cli
+            proc = await asyncio.create_subprocess_exec(
+                "pw-cli",
+                "set-param",
+                device,
+                "Props",
+                f'{{"volume": {volume}}}',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+
+            self.volumes[device] = volume
+
         except Exception as e:
-            logging.error(f"Failed to set volume: {e}")
+            self.logger.error(f"Failed to set volume: {e}")
+            raise
+
+    async def get_volume(self, device: str) -> float:
+        """Get current volume from PipeWire"""
+        try:
+            # Try wpctl first
+            proc = await asyncio.create_subprocess_exec(
+                "wpctl",
+                "get-volume",
+                device,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode == 0:
+                # Parse volume from wpctl output (format: "Volume: 0.75")
+                volume_str = stdout.decode().strip().split()[-1]
+                return float(volume_str)
+
+            # Fallback to pw-dump
+            proc = await asyncio.create_subprocess_exec(
+                "pw-dump",
+                device,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+
+            # Parse volume from PipeWire dump
+            data = json.loads(stdout.decode())
+            for node in data:
+                if str(node.get("id")) == device:
+                    props = node.get("info", {}).get("params", {}).get("Props", {})
+                    if "volume" in props:
+                        return float(props["volume"])
+
+            return self.volumes.get(device, 0.0)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get volume: {e}")
+            return 0.0
+
+    async def set_default_output(self, device: str) -> bool:
+        """Set default output device"""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "wpctl",
+                "set-default",
+                device,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            return proc.returncode == 0
+        except Exception as e:
+            self.logger.error(f"Failed to set default output: {e}")
             return False
 
+    async def get_device_status(self) -> Dict:
+        """Get detailed device status using wpctl"""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "wpctl",
+                "status",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+
+            status = stdout.decode()
+            devices = {}
+
+            # Parse wpctl status output
+            current_section = None
+            for line in status.split("\n"):
+                if "Sinks:" in line:
+                    current_section = "outputs"
+                elif "Sources:" in line:
+                    current_section = "inputs"
+                elif line.strip() and current_section:
+                    if "├" in line or "└" in line:
+                        parts = line.strip().split()
+                        device_id = parts[1]
+                        name = " ".join(parts[2:])
+                        devices[device_id] = {
+                            "name": name,
+                            "type": current_section,
+                            "volume": await self.get_volume(device_id),
+                        }
+
+            return devices
+
+        except Exception as e:
+            self.logger.error(f"Failed to get device status: {e}")
+            return {}
+
     async def get_status(self) -> Dict:
-        """Get current audio system status"""
-        return {
-            "devices": self.devices,
+        """Get current audio status"""
+        status = {
+            "outputs": self.outputs,
             "routes": self.routes,
+            "volumes": self.volumes,
+            "mode": self.mode,
         }
+
+        # Add route health status
+        route_health = {}
+        for route_id in self.routes:
+            route_health[route_id] = await self.verify_route(route_id)
+        status["route_health"] = route_health
+
+        return status
+
+    async def _verify_services(self):
+        """Verify required services are running"""
+        required = ["pipewire", "pipewire-pulse", "wireplumber"]
+        for service in required:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl",
+                "--user",
+                "is-active",
+                service,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            if stdout.decode().strip() != "active":
+                raise RuntimeError(f"Service {service} not running")
+
+    async def cleanup(self):
+        """Clean up resources"""
+        # Remove all links
+        for route_id, route in self.routes.items():
+            for link in route.get("links", []):
+                try:
+                    source, target = link.split(" -> ")
+                    proc = await asyncio.create_subprocess_exec(
+                        "pw-link",
+                        "-d",
+                        source,
+                        target,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await proc.communicate()
+                except Exception as e:
+                    self.logger.error(f"Failed to remove link {link}: {e}")
+
+        # Reset volumes
+        for device in self.volumes:
+            try:
+                await self.set_volume(device, 0)
+            except Exception as e:
+                self.logger.error(f"Failed to reset volume for {device}: {e}")

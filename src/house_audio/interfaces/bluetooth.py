@@ -7,7 +7,7 @@ import json
 
 
 class BluetoothInterface:
-    """Interface to BlueALSA for Bluetooth audio devices"""
+    """Interface for Bluetooth audio devices using PipeWire"""
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -16,10 +16,10 @@ class BluetoothInterface:
         self._monitor_task = None
 
     async def setup(self):
-        """Initialize BlueALSA"""
+        """Initialize Bluetooth interface"""
         try:
-            # Verify bluealsa is running
-            await self._verify_bluealsa()
+            # Verify PipeWire Bluetooth is running
+            await self._verify_services()
 
             # Set up pairing agent
             await self._setup_agent()
@@ -34,7 +34,7 @@ class BluetoothInterface:
             self._monitor_task = asyncio.create_task(self.start_signal_monitoring())
 
         except Exception as e:
-            self.logger.error(f"BlueALSA setup failed: {e}")
+            self.logger.error(f"Bluetooth setup failed: {e}")
             raise
 
     async def cleanup(self):
@@ -59,30 +59,37 @@ class BluetoothInterface:
         except Exception as e:
             self.logger.error(f"Cleanup failed: {e}")
 
-    async def _verify_bluealsa(self):
-        """Verify BlueALSA service is running and configured"""
+    async def _verify_services(self):
+        """Verify required services are running"""
         try:
-            # Check service
-            proc = await asyncio.create_subprocess_exec(
-                "systemctl", "is-active", "bluealsa", stdout=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await proc.communicate()
-            if proc.returncode != 0:
-                raise RuntimeError("BlueALSA service not running")
+            # Check PipeWire services
+            for service in ["pipewire", "pipewire-pulse", "wireplumber"]:
+                proc = await asyncio.create_subprocess_exec(
+                    "systemctl",
+                    "--user",
+                    "is-active",
+                    service,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
+                if stdout.decode().strip() != "active":
+                    raise RuntimeError(f"Service {service} not running")
 
-            # Check bluealsa-aplay
+            # Check Bluetooth service
             proc = await asyncio.create_subprocess_exec(
-                "bluealsa-aplay",
-                "--list-devices",
+                "systemctl",
+                "is-active",
+                "bluetooth",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                raise RuntimeError(f"BlueALSA check failed: {stderr.decode()}")
+            stdout, _ = await proc.communicate()
+            if stdout.decode().strip() != "active":
+                raise RuntimeError("Bluetooth service not running")
 
         except Exception as e:
-            self.logger.error(f"BlueALSA verification failed: {e}")
+            self.logger.error(f"Service verification failed: {e}")
             raise
 
     async def _setup_agent(self):
@@ -318,16 +325,25 @@ class BluetoothInterface:
     async def get_active_devices(self) -> List[str]:
         """Get list of connected audio devices"""
         try:
+            # Use pw-dump to get active Bluetooth sources
             proc = await asyncio.create_subprocess_exec(
-                "bluealsa-aplay", "--list-devices", stdout=asyncio.subprocess.PIPE
+                "pw-dump",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
             stdout, _ = await proc.communicate()
 
             devices = []
-            for line in stdout.decode().split("\n"):
-                if "=" in line:
-                    mac = line.split("=")[1].strip()
-                    devices.append(mac)
+            nodes = json.loads(stdout.decode())
+            for node in nodes:
+                if node.get("type") == "PipeWire:Interface:Node":
+                    props = node.get("info", {}).get("props", {})
+                    if props.get(
+                        "media.class"
+                    ) == "Audio/Source" and "bluez" in props.get("node.name", ""):
+                        # Extract MAC from node name (bluez_source.XX_XX_XX_XX_XX_XX)
+                        mac = props["node.name"].split(".")[-1].replace("_", ":")
+                        devices.append(mac)
 
             return devices
 
