@@ -241,22 +241,51 @@ stream.properties = {
 }
 EOF
 
+# Reset any failed services before starting
+echo "Resetting service states..."
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user reset-failed pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service filter-chain.service || true
+
 # Enable and start PipeWire for the user
 echo "Setting up PipeWire services..."
-# First enable all services
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.socket pipewire-pulse.socket
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.service pipewire-pulse.service wireplumber.service filter-chain.service
 
-# Then start them in the correct order
+# First stop everything in reverse order
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire-pulse.service pipewire-pulse.socket filter-chain.service wireplumber.service pipewire.service pipewire.socket || true
+
+# Clear any remaining sockets
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse || true
+
+# Enable services
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.socket
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.service
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable wireplumber.service
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire-pulse.socket
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire-pulse.service
+
+# Start in correct order with proper delays
+echo "Starting PipeWire services..."
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire.socket
-sleep 1
+sleep 2  # Give socket time to initialize
+
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire.service
-sleep 1
+sleep 2  # Give PipeWire time to initialize
+
+# Check if PipeWire started successfully
+if ! run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user is-active pipewire.service > /dev/null 2>&1; then
+    echo "Error: PipeWire failed to start. Checking logs..."
+    run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") journalctl --user -u pipewire.service --no-pager -n 50
+    exit 1
+fi
+
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start wireplumber.service
+sleep 2  # Give WirePlumber time to initialize
+
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire-pulse.socket
 sleep 1
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start filter-chain.service
-sleep 1
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire-pulse.socket pipewire-pulse.service
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire-pulse.service
+
+# Remove filter-chain for now as it's causing issues
+# run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start filter-chain.service
 
 # Add user to required groups
 echo "Adding user to required groups..."
