@@ -29,6 +29,34 @@ check_package() {
     fi
 }
 
+# Function to backup a file
+backup_file() {
+    local file=$1
+    if [ -f "$file" ]; then
+        echo "Backing up $file..."
+        sudo cp "$file" "${file}.bak.$(date +%Y%m%d_%H%M%S)"
+    fi
+}
+
+# Check if running in user session
+if [ -z "${XDG_RUNTIME_DIR}" ]; then
+    echo -e "${RED}Error: This script must be run in a user session.${NC}"
+    echo "Please log in to a terminal session (not via SSH) and try again."
+    exit 1
+fi
+
+# Check Python version
+if ! command -v python3 &> /dev/null; then
+    echo -e "${RED}Error: Python 3 is required but not installed.${NC}"
+    exit 1
+fi
+
+PYTHON_VERSION=$(python3 -c 'import sys; print(sys.version_info[1])')
+if [ "$PYTHON_VERSION" -lt 7 ]; then
+    echo -e "${RED}Error: Python 3.7 or higher is required.${NC}"
+    exit 1
+fi
+
 # Parse command line arguments
 INSTALL_MODE="standalone"
 while [[ $# -gt 0 ]]; do
@@ -46,25 +74,30 @@ done
 
 # Required packages based on codebase analysis
 REQUIRED_PACKAGES=(
-    "bluez"              # Base Bluetooth stack
-    "bluez-alsa-utils"   # BlueALSA utilities
-    "bluez-tools"        # Includes bt-agent
-    "bluez-hid2hci"      # HID to HCI conversion tool
-    "libasound2-dev"     # ALSA development files
-    "libbluetooth-dev"   # Bluetooth development files
-    "libasound2-plugins" # ALSA plugins including BlueALSA
-    "python3-pip"        # Python package manager
-    "libdbus-1-dev"      # D-Bus development files
-    "python3-dbus"       # D-Bus Python bindings
-    "python3-psutil"     # System utilities for Python
-    "alsa-utils"         # ALSA utilities
+    # Bluetooth core
+    "bluez"                    # Base Bluetooth stack
+    "bluetooth"                # Bluetooth utilities
+    "bluez-tools"             # Includes bt-agent
+    
+    # Audio core
+    "pipewire"                # Modern audio server
+    "pipewire-pulse"          # PulseAudio replacement
+    "wireplumber"             # Session manager for PipeWire
+    "pipewire-audio-client-libraries" # Audio client libraries
+    "pipewire-alsa"           # ALSA compatibility
+    "wireplumber-cli"         # For wpctl command
+    
+    # Python dependencies
+    "python3-pip"             # Python package manager
+    "python3-dbus"            # D-Bus Python bindings
+    "python3-psutil"          # System utilities for Python
+    "libdbus-1-dev"           # D-Bus development files
 )
 
-# Add multi-room packages if needed
+# Remove multi-room mode as we're focusing on standalone
 if [ "$INSTALL_MODE" = "multi-room" ]; then
-    REQUIRED_PACKAGES+=(
-        "snapclient"     # Snapcast client for multi-room audio
-    )
+    echo -e "${YELLOW}Note: Multi-room mode is not yet supported${NC}"
+    exit 1
 fi
 
 # Check system requirements
@@ -88,410 +121,150 @@ if (( $(echo "$ROOT_SPACE < 2" | bc -l) )); then
     exit 1
 fi
 
-# Check existing packages
-echo -e "\nChecking existing packages..."
-PACKAGES_TO_INSTALL=()
-for pkg in "${REQUIRED_PACKAGES[@]}"; do
-    if ! check_package "$pkg"; then
-        PACKAGES_TO_INSTALL+=("$pkg")
-    fi
-done
+# Backup existing configurations
+echo "Backing up existing configurations..."
+backup_file "/etc/pulse/default.pa"
+backup_file "/etc/asound.conf"
+backup_file "/etc/bluetooth/main.conf"
 
-# Update package lists if needed
-if [ ${#PACKAGES_TO_INSTALL[@]} -gt 0 ]; then
-    echo -e "\nUpdating package lists..."
-    sudo apt update || {
-        echo -e "${RED}Failed to update package lists${NC}"
-        echo "Trying alternative mirrors..."
-        sudo rm -rf /var/lib/apt/lists/*
-        sudo apt clean
-        sudo sed -i 's/deb.debian.org/archive.raspberrypi.org/g' /etc/apt/sources.list
-        sudo apt update || {
-            echo -e "${RED}Package update failed. Please check your internet connection.${NC}"
-            exit 1
-        }
-    }
+# Remove existing audio packages and configurations for clean install
+echo -e "\nRemoving existing audio packages..."
 
-    # Install missing packages
-    echo -e "\nInstalling required packages..."
-    sudo apt install -y "${PACKAGES_TO_INSTALL[@]}"
-    check_status "Package installation"
-fi
+# Stop all audio services
+systemctl --user stop pipewire pipewire-pulse wireplumber 2>/dev/null || true
+systemctl stop pulseaudio pulseaudio.socket 2>/dev/null || true
 
-# Configure audio
-echo -e "\nConfiguring audio system..."
+# Remove PulseAudio completely
+apt-get remove --purge -y pulseaudio pulseaudio-* libpulse0 2>/dev/null || true
+apt-get remove --purge -y bluealsa bluez-alsa-utils 2>/dev/null || true
+apt-get autoremove -y
 
-# Detect primary audio output
-if aplay -l | grep -q "USB Audio"; then
-    DEFAULT_CARD="2"  # USB Audio
-    DEFAULT_DEVICE="USB Audio"
-elif aplay -l | grep -q "Headphones"; then
-    DEFAULT_CARD="1"  # Headphones
-    DEFAULT_DEVICE="Headphones"
-else
-    DEFAULT_CARD="0"  # HDMI
-    DEFAULT_DEVICE="HDMI"
-fi
-echo "→ Using $DEFAULT_DEVICE as primary output"
+# Clean up old configuration files
+echo "Cleaning up old configurations..."
+rm -rf /etc/pulse
+rm -f /etc/asound.conf
+rm -f ~/.config/pulse
+rm -f ~/.pulse*
+rm -f /etc/systemd/system/bluealsa.service
+rm -f /etc/systemd/system/bluealsa-aplay.service
 
-# Set up ALSA config if it doesn't exist
-if [ ! -f /etc/asound.conf ]; then
-    echo "Creating ALSA configuration..."
-    sudo tee /etc/asound.conf << EOF
-# Software volume control
-pcm.softvol {
-    type softvol
-    slave.pcm "merged"
-    control {
-        name "Master"
-        card ${DEFAULT_CARD}
+# Update package lists
+echo -e "\nUpdating package lists..."
+apt-get update || {
+    echo -e "${RED}Failed to update package lists${NC}"
+    echo "Trying alternative mirrors..."
+    rm -rf /var/lib/apt/lists/*
+    apt-get clean
+    sed -i 's/deb.debian.org/archive.raspberrypi.org/g' /etc/apt/sources.list
+    apt-get update || {
+        echo -e "${RED}Package update failed. Please check your internet connection.${NC}"
+        exit 1
     }
 }
 
-# Merge all outputs
-pcm.merged {
-    type asym
-    playback.pcm {
-        type plug
-        slave.pcm "dmix"
-    }
-    capture.pcm {
-        type plug
-        slave.pcm "dsnoop"
-    }
-}
-
-# Hardware mixing
-pcm.dmix {
-    type dmix
-    ipc_key 1024
-    slave {
-        pcm "hw:${DEFAULT_CARD},0"
-        period_time 0
-        period_size 1024
-        buffer_size 4096
-        rate 44100
-        format S32_LE  # Better quality
-    }
-}
-
-# Default PCM device (BlueALSA)
-pcm.!default {
-    type plug
-    slave.pcm "softvol"
-}
-
-# BlueALSA configuration
-pcm.bluealsa {
-    type bluealsa
-    interface "hci0"
-    profile "a2dp"
-    delay 10000  # Standard delay value
-    volume_method "linear"
-    soft_volume on
-}
-
-# Hardware devices with individual volume
-pcm.headphones {
-    type plug
-    slave.pcm {
-        type softvol
-        slave.pcm "hw:1,0"
-        control {
-            name "Headphones"
-            card 1
-        }
-        min_dB -51.0
-        max_dB 0.0
-        resolution 256
-    }
-    hint {
-        show on
-        description "Headphones Output"
-    }
-}
-
-pcm.usb {
-    type plug
-    slave.pcm {
-        type softvol
-        slave.pcm "hw:2,0"
-        control {
-            name "USB"
-            card 2
-        }
-        min_dB -51.0
-        max_dB 0.0
-    }
-}
-
-ctl.!default {
-    type hw
-    card ${DEFAULT_CARD}
-}
-EOF
-    check_status "ALSA configuration"
-
-    # Add Snapcast configuration if needed
-    if [ "$INSTALL_MODE" = "multi-room" ]; then
-        sudo tee -a /etc/asound.conf << EOF
-# Snapcast support
-pcm.snapcast {
-    type plug
-    slave.pcm "bluealsa"
-}
-EOF
-    fi
-fi
-
-# Set up BlueALSA service
-echo "Setting up BlueALSA service..."
-sudo tee /etc/systemd/system/bluealsa.service << EOF
-[Unit]
-Description=BluezALSA proxy
-Requires=bluetooth.service
-After=bluetooth.service
-Before=bluealsa-aplay.service
-PartOf=bluetooth.service
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/bin/bluealsa -p a2dp-sink -p a2dp-source
-ExecStartPre=/bin/sleep 3
-Restart=on-failure
-RestartSec=5
-TimeoutStartSec=10
-
-[Install]
-WantedBy=multi-user.target
-Also=bluealsa-aplay.service
-EOF
-
-# Set up BlueALSA player service
-sudo tee /etc/systemd/system/bluealsa-aplay.service << EOF
-[Unit]
-Description=BlueALSA aplay service
-Requires=bluealsa.service
-After=bluealsa.service
-PartOf=bluetooth.service
-
-[Service]
-Type=simple
-User=root
-ExecStartPre=/bin/sleep 2
-ExecStart=/usr/bin/bluealsa-aplay --pcm-buffer-time=250000 00:00:00:00:00:00
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start services in correct order
-echo "Starting services..."
-sudo systemctl daemon-reload
-
-# Stop all services first
-sudo systemctl stop bluealsa-aplay bluetooth bluealsa bt-agent
-
-# Start services with proper delays
-sudo systemctl enable bluetooth
-sudo systemctl restart bluetooth
-sleep 2
-sudo systemctl enable bt-agent
-sudo systemctl restart bt-agent
-sleep 2
-sudo systemctl enable bluealsa
-sudo systemctl restart bluealsa
-sleep 2
-sudo systemctl enable bluealsa-aplay
-sudo systemctl restart bluealsa-aplay
-
-# Verify services
-for service in bluetooth bt-agent bluealsa bluealsa-aplay; do
-    if ! systemctl is-active --quiet $service; then
-        echo -e "${RED}Service $service failed to start${NC}"
-        echo "Checking logs..."
-        journalctl -u $service -n 50
+# Install required packages one by one
+echo -e "\nInstalling required packages..."
+for package in "${REQUIRED_PACKAGES[@]}"; do
+    echo "Installing $package..."
+    if ! apt-get install -y "$package"; then
+        echo -e "${RED}Failed to install $package${NC}"
+        echo "Please check the error message above and try again."
         exit 1
     fi
 done
+check_status "Package installation"
 
-# Configure Bluetooth
+# Configure Bluetooth daemon
+echo -e "\nConfiguring Bluetooth daemon..."
+mkdir -p /etc/systemd/system/bluetooth.service.d
+tee /etc/systemd/system/bluetooth.service.d/override.conf << EOF
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/bluetoothd --experimental
+EOF
+check_status "Bluetooth daemon configuration"
+
+# Enable PipeWire for the current user
+echo "Setting up PipeWire..."
+if ! systemctl --user enable pipewire pipewire-pulse wireplumber; then
+    echo -e "${RED}Failed to enable PipeWire services${NC}"
+    echo "Please ensure you're running in a proper user session."
+    exit 1
+fi
+
+if ! systemctl --user start pipewire pipewire-pulse wireplumber; then
+    echo -e "${RED}Failed to start PipeWire services${NC}"
+    echo "Please check the logs with: journalctl --user -u pipewire"
+    exit 1
+fi
+check_status "PipeWire service configuration"
+
+# Add user to required groups
+echo "Setting up user permissions..."
+usermod -a -G bluetooth,audio $USER
+check_status "User permissions"
+
+# Configure Bluetooth for better audio
 echo "Configuring Bluetooth..."
-
-# Set up Bluetooth agent
-sudo tee /etc/bluetooth/main.conf << EOF
+tee /etc/bluetooth/main.conf << EOF
 [General]
-DiscoverableTimeout=0
-Class=0x200414  # Audio device
-Name=House Audio
-Discoverable=true
-ControllerMode=dual
-FastConnectable=true
-
-[LE]
-MinConnectionInterval=7.5
-MaxConnectionInterval=15
-ConnectionLatency=0
+Class = 0x200414  # Audio device
+Name = Bluebard Audio
+Discoverable = true
+DiscoverableTimeout = 0
 
 [Policy]
 AutoEnable=true
+
+[Policy]
 ReconnectAttempts=3
 ReconnectIntervals=1,2,4
 EOF
 
-# Configure authentication agent
-sudo tee /etc/systemd/system/bt-agent.service << EOF
-[Unit]
-Description=Bluetooth Auth Agent
-After=bluetooth.service
-Requires=bluetooth.service
-Before=bluealsa.service
-PartOf=bluetooth.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/bt-agent -c NoInputNoOutput --capability=NoInputNoOutput
-ExecStartPre=/bin/sleep 2
-Environment=DISPLAY=:0
-Restart=on-failure
-RestartSec=5
-StartLimitInterval=60
-StartLimitBurst=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start agent
-sudo systemctl enable bt-agent
-sudo systemctl start bt-agent
-
-# Configure BlueALSA
-sudo systemctl restart bluetooth
-check_status "Bluetooth configuration"
-
-# Test Bluetooth audio
-echo "Testing Bluetooth audio setup..."
-if ! timeout 5 bluealsa-aplay -L; then
-    echo -e "${YELLOW}Warning: BlueALSA playback test failed${NC}"
-fi
-
-# Set up user permissions
-echo "Setting up permissions..."
-sudo usermod -a -G bluetooth,audio $USER
-check_status "User permissions"
-
-# Install Python package system-wide
-echo "Installing Python package system-wide..."
-cd "$(dirname "$0")/.."
-# Install dependencies first
-sudo pip3 install --break-system-packages wheel setuptools
-
-# Try installing with pip directly first
-if ! sudo pip3 install --break-system-packages -e .; then
-    echo "Pip install failed, trying alternative installation..."
-    # Try installing with python directly
-    sudo python3 setup.py install --force
-fi
-check_status "Python package installation"
-
-# Enable experimental features
-# Find bluetoothd path
-BLUETOOTHD_PATH=$(which bluetoothd)
-if [ -z "$BLUETOOTHD_PATH" ]; then
-    echo "Checking alternative locations..."
-    for path in "/usr/sbin/bluetoothd" "/usr/lib/bluetooth/bluetoothd" "/usr/libexec/bluetooth/bluetoothd"; do
-        if [ -x "$path" ]; then
-            BLUETOOTHD_PATH="$path"
+# Verify services with timeout
+echo -e "\nVerifying services..."
+for service in bluetooth pipewire pipewire-pulse wireplumber; do
+    echo -n "Waiting for $service to start..."
+    for i in {1..30}; do
+        if systemctl --user is-active --quiet "$service" 2>/dev/null; then
+            echo -e "\n${GREEN}✓ $service is running${NC}"
             break
         fi
+        if [ $i -eq 30 ]; then
+            echo -e "\n${RED}Service $service failed to start${NC}"
+            echo "Last 50 lines of logs:"
+            journalctl --user -u "$service" -n 50
+            exit 1
+        fi
+        echo -n "."
+        sleep 1
     done
-fi
-
-if [ -z "$BLUETOOTHD_PATH" ]; then
-    echo -e "${RED}Error: bluetoothd not found${NC}"
-    echo "Checking package installation..."
-    dpkg -l | grep bluez
-    echo "Trying to reinstall bluez..."
-    sudo apt-get install --reinstall bluez
-    BLUETOOTHD_PATH=$(which bluetoothd)
-    if [ -z "$BLUETOOTHD_PATH" ]; then
-        echo -e "${RED}Failed to locate bluetoothd after reinstall${NC}"
-        exit 1
-    fi
-fi
-
-echo "Found bluetoothd at: ${BLUETOOTHD_PATH}"
-
-# Stop all services first
-echo "Stopping services..."
-sudo systemctl stop bluealsa-aplay bluetooth bluealsa bt-agent
-
-# Clean up any existing configuration
-sudo rm -f /etc/systemd/system/bluetooth.service.d/experimental.conf
-sudo rm -f /etc/systemd/system/bluetooth.service.d/override.conf
-
-# Clean up bluetooth directory
-sudo rm -rf /etc/bluetooth
-sudo mkdir -p /etc/bluetooth
-sudo chmod 755 /etc/bluetooth
-sudo chown -R root:root /etc/bluetooth
-
-sudo mkdir -p /etc/systemd/system/bluetooth.service.d
-sudo tee /etc/systemd/system/bluetooth.service.d/experimental.conf << EOF
-[Service]
-ExecStart=
-ExecStart=${BLUETOOTHD_PATH} --experimental
-Environment=LIBASOUND_THREAD_SAFE=0
-EOF
-
-# Reload systemd and restart bluetooth
-sudo systemctl daemon-reload
-sudo systemctl reset-failed bluetooth
-sudo systemctl stop bluetooth
-sleep 2
-sudo systemctl enable bluetooth
-sleep 1
-sudo systemctl restart bluetooth
-sleep 2  # Give it time to start
-
-# Verify bluetooth service
-if ! systemctl is-active --quiet bluetooth; then
-    echo -e "${RED}Bluetooth service failed to start${NC}"
-    echo "Checking logs..."
-    journalctl -u bluetooth -n 50
-    echo "Bluetoothd path: ${BLUETOOTHD_PATH}"
-    echo "Current status:"
-    systemctl status bluetooth
-    echo "Checking service file:"
-    systemctl cat bluetooth
-    exit 1
-fi
-
-# Start other services in order
-echo "Starting services..."
-sudo systemctl restart bt-agent
-sleep 2
-sudo systemctl restart bluealsa
-sleep 2
-sudo systemctl restart bluealsa-aplay
-sleep 2
-
-# Final verification
-for service in bluetooth bt-agent bluealsa bluealsa-aplay; do
-    if ! systemctl is-active --quiet $service; then
-        echo -e "${RED}Service $service failed to start${NC}"
-        echo "Checking logs..."
-        journalctl -u $service -n 50
-        exit 1
-    fi
-    echo -e "${GREEN}✓ $service started${NC}"
 done
 
+# Test audio setup
+echo -e "\nTesting audio setup..."
+if command -v wpctl &> /dev/null; then
+    echo "Audio devices found:"
+    wpctl status | grep -A 5 "Audio" || echo "No audio devices found"
+else
+    echo -e "${YELLOW}Warning: wpctl not found. Audio device listing not available${NC}"
+fi
+
 echo -e "\n${GREEN}Installation complete!${NC}"
-echo -e "\nNext steps:"
-echo "1. Log out and log back in for permissions to take effect"
-echo "2. Test audio with: python3 -m house_audio.tools.test_audio" 
+echo "You may need to log out and back in for group changes to take effect."
+echo "Try running 'python3 -m house_audio.tools.test_audio' to test the setup."
+
+# Add performance notes
+echo -e "\n${YELLOW}Performance Notes:${NC}"
+echo "1. The built-in WiFi/BT combo chip may have issues when both are used heavily"
+echo "2. For best results, consider using a separate USB Bluetooth dongle"
+echo "3. If audio drops out, check 'journalctl --user -u pipewire' for issues"
+
+# Final checks
+echo -e "\n${YELLOW}Post-installation Checks:${NC}"
+echo "1. Checking PipeWire status..."
+systemctl --user status pipewire | grep "Active:"
+echo "2. Checking Bluetooth status..."
+systemctl status bluetooth | grep "Active:"
+echo "3. Checking audio devices..."
+wpctl status | grep -A 5 "Audio" || echo "No audio devices found" 
