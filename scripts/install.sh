@@ -119,6 +119,12 @@ run_as_root pip3 install --break-system-packages -e .
 
 # Configure Bluetooth
 echo "Configuring Bluetooth..."
+
+# Fix Bluetooth configuration directory permissions
+run_as_root mkdir -p /etc/bluetooth
+run_as_root chmod 555 /etc/bluetooth
+run_as_root chown root:root /etc/bluetooth
+
 run_as_root install -m 644 /dev/stdin /etc/bluetooth/main.conf << EOF
 [General]
 Class = 0x200414
