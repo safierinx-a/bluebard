@@ -14,6 +14,13 @@ if [ -z "$ACTUAL_USER" ]; then
     exit 1
 fi
 
+# Get user's home directory
+USER_HOME=$(getent passwd "$ACTUAL_USER" | cut -d: -f6)
+if [ -z "$USER_HOME" ]; then
+    echo "Could not determine user's home directory."
+    exit 1
+fi
+
 echo "Installing Bluebard Audio System..."
 
 # Function to run a command as the actual user
@@ -42,8 +49,8 @@ run_as_root mkdir -p "$BACKUP_DIR"
 
 # Stop all existing audio services
 echo "Stopping audio services..."
-run_as_user systemctl --user stop pulseaudio.service pulseaudio.socket 2>/dev/null || true
-run_as_user systemctl --user disable pulseaudio.service pulseaudio.socket 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pulseaudio.service pulseaudio.socket 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pulseaudio.service pulseaudio.socket 2>/dev/null || true
 run_as_root systemctl stop pulseaudio.service pulseaudio.socket 2>/dev/null || true
 run_as_root systemctl disable pulseaudio.service pulseaudio.socket 2>/dev/null || true
 run_as_root systemctl stop bluealsa.service 2>/dev/null || true
@@ -59,6 +66,8 @@ run_as_root apt-get remove --purge -y \
     bluealsa-* \
     libasound2-plugin-bluez || true
 
+run_as_root apt-get autoremove -y
+
 # Clean up old configurations and state
 echo "Cleaning up old configurations..."
 run_as_root rm -rf \
@@ -72,7 +81,6 @@ run_as_root rm -rf \
 
 # Clean up user-specific audio configurations
 echo "Cleaning up user configurations..."
-USER_HOME=$(getent passwd "$ACTUAL_USER" | cut -d: -f6)
 run_as_user rm -rf \
     "$USER_HOME/.config/pulse" \
     "$USER_HOME/.pulse" \
@@ -100,16 +108,14 @@ run_as_root apt-get install -y \
     pipewire-bin \
     libspa-0.2-bluetooth \
     libspa-0.2-jack \
-    python3 \
-    python3-pip \
     python3-dbus \
     python3-gi \
     python3-setuptools \
     python3-wheel
 
-# Install Python package for the user
+# Install Python package system-wide
 echo "Installing Bluebard package..."
-run_as_user pip3 install --user -e .
+run_as_root pip3 install --break-system-packages -e .
 
 # Configure Bluetooth
 echo "Configuring Bluetooth..."
@@ -142,8 +148,8 @@ EOF
 
 # Set up user PipeWire configuration
 echo "Setting up user PipeWire configuration..."
-run_as_user mkdir -p ~/.config/pipewire/pipewire.conf.d
-run_as_user install -m 644 /dev/stdin ~/.config/pipewire/pipewire.conf.d/99-bluebard.conf << EOF
+run_as_user mkdir -p "$USER_HOME/.config/pipewire/pipewire.conf.d"
+run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/pipewire/pipewire.conf.d/99-bluebard.conf" << EOF
 {
     "context.properties": {
         "default.clock.rate": 48000,
@@ -156,12 +162,13 @@ EOF
 
 # Restart Bluetooth service
 echo "Restarting Bluetooth service..."
+run_as_root systemctl daemon-reload
 run_as_root systemctl restart bluetooth.service
 
 # Enable and start PipeWire for the user
 echo "Setting up PipeWire services..."
-run_as_user systemctl --user enable pipewire.service pipewire-pulse.service
-run_as_user systemctl --user start pipewire.service pipewire-pulse.service
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.service pipewire-pulse.service
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire.service pipewire-pulse.service
 
 # Add user to required groups
 echo "Adding user to required groups..."
@@ -171,7 +178,7 @@ run_as_root usermod -a -G bluetooth,audio "$ACTUAL_USER"
 echo "Verifying installation..."
 sleep 2  # Give services time to start
 
-if ! run_as_user pactl info > /dev/null 2>&1; then
+if ! run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") pactl info > /dev/null 2>&1; then
     echo "Warning: PipeWire audio server is not running properly"
     echo "Try running: systemctl --user restart pipewire pipewire-pulse"
 else
