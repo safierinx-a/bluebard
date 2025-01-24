@@ -49,6 +49,13 @@ run_as_root mkdir -p "$BACKUP_DIR"
 
 # Stop all existing audio services
 echo "Stopping audio services..."
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire-pulse.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop wireplumber.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire-pulse.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable wireplumber.service 2>/dev/null || true
+
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pulseaudio.service pulseaudio.socket 2>/dev/null || true
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pulseaudio.service pulseaudio.socket 2>/dev/null || true
 run_as_root systemctl stop pulseaudio.service pulseaudio.socket 2>/dev/null || true
@@ -137,20 +144,28 @@ run_as_root mkdir -p /etc/systemd/system/bluetooth.service.d
 run_as_root install -m 644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf << EOF
 [Service]
 ExecStart=
-ExecStart=$BLUETOOTHD_PATH --noplugin=sap
+ExecStart=$BLUETOOTHD_PATH --experimental
+Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u "$ACTUAL_USER")/pulse
 EOF
 
 run_as_root install -m 644 /dev/stdin /etc/bluetooth/main.conf << EOF
 [General]
-Class = 0x200414
+Class = 0x200414  # Audio device
 Name = Bluebard Audio
 DiscoverableTimeout = 0
 Discoverable = true
+Enable=Source,Sink,Media,Socket,Gateway
+FastConnectable=true
+Experimental = true
 
 [Policy]
-AutoEnable = true
-ReconnectAttempts = 3
-ReconnectIntervals = 1,2,4
+AutoEnable=true
+ReconnectAttempts=7
+ReconnectIntervals=1,2,4,8,16,32,64
+
+[GATT]
+KeySize=16
+ExchangeMTU=517
 EOF
 
 # Configure PipeWire
@@ -162,7 +177,29 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
         "default.clock.rate": 48000,
         "default.clock.quantum": 1024,
         "default.clock.min-quantum": 32,
-        "default.clock.max-quantum": 8192
+        "default.clock.max-quantum": 8192,
+        "support.dbus": true,
+        "log.level": 2
+    },
+    "context.modules": [
+        {
+            "name": "libpipewire-module-protocol-native"
+        },
+        {
+            "name": "libpipewire-module-client-node"
+        },
+        {
+            "name": "libpipewire-module-adapter"
+        },
+        {
+            "name": "libpipewire-module-metadata"
+        },
+        {
+            "name": "libpipewire-module-session-manager"
+        }
+    ],
+    "pulse.properties": {
+        "server.address": [ "unix:/run/user/$(id -u "$ACTUAL_USER")/pulse/native" ]
     },
     "pulse.properties.rules": [
         {
@@ -171,7 +208,11 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
                 "update-props": {
                     "bluez5.autoswitch-profile": true,
                     "bluez5.profile": "a2dp-sink",
-                    "bluez5.roles": [ "sink" ]
+                    "bluez5.roles": [ "sink" ],
+                    "bluez5.reconnect-profiles": [ "a2dp_sink", "headset_head_unit" ],
+                    "bluez5.codecs": [ "aac", "sbc_xq", "sbc" ],
+                    "api.alsa.period-size": 1024,
+                    "api.alsa.headroom": 8192
                 }
             }
         }
@@ -179,41 +220,43 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
 }
 EOF
 
-# Set up user PipeWire configuration
-echo "Setting up user PipeWire configuration..."
-run_as_user mkdir -p "$USER_HOME/.config/pipewire/pipewire.conf.d"
-cat << EOF | run_as_user tee "$USER_HOME/.config/pipewire/pipewire.conf.d/99-bluebard.conf" > /dev/null
-{
-    "context.properties": {
-        "default.clock.rate": 48000,
-        "default.clock.quantum": 1024,
-        "default.clock.min-quantum": 32,
-        "default.clock.max-quantum": 8192
-    },
-    "pulse.properties.rules": [
-        {
-            "matches": [ { "device.name": "~bluez_*" } ],
-            "actions": {
-                "update-props": {
-                    "bluez5.autoswitch-profile": true,
-                    "bluez5.profile": "a2dp-sink",
-                    "bluez5.roles": [ "sink" ]
-                }
-            }
-        }
-    ]
+# Set up WirePlumber configuration
+echo "Setting up WirePlumber configuration..."
+run_as_root mkdir -p /etc/wireplumber/main.lua.d
+run_as_root install -m 644 /dev/stdin /etc/wireplumber/main.lua.d/51-bluebard.lua << EOF
+bluez_monitor.properties = {
+  ["bluez5.enable-sbc-xq"] = true,
+  ["bluez5.enable-msbc"] = true,
+  ["bluez5.enable-hw-volume"] = true,
+  ["bluez5.headset-roles"] = "[ sink, source ]",
+  ["bluez5.hfphsp-backend"] = "native"
+}
+
+stream.properties = {
+  ["resample.quality"] = 7,
+  ["resample.disable"] = false,
+  ["channelmix.normalize"] = true,
+  ["channelmix.mix-lfe"] = false,
+  ["dither.noise"] = -90
 }
 EOF
-
-# Restart Bluetooth service
-echo "Restarting Bluetooth service..."
-run_as_root systemctl daemon-reload
-run_as_root systemctl restart bluetooth.service
 
 # Enable and start PipeWire for the user
 echo "Setting up PipeWire services..."
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.service pipewire-pulse.service
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire.service pipewire-pulse.service
+# First enable all services
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.socket pipewire-pulse.socket
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.service pipewire-pulse.service wireplumber.service filter-chain.service
+
+# Then start them in the correct order
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire.socket
+sleep 1
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire.service
+sleep 1
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start wireplumber.service
+sleep 1
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start filter-chain.service
+sleep 1
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire-pulse.socket pipewire-pulse.service
 
 # Add user to required groups
 echo "Adding user to required groups..."
