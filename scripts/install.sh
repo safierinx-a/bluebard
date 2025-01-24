@@ -155,7 +155,7 @@ EOF
 # Set up user PipeWire configuration
 echo "Setting up user PipeWire configuration..."
 run_as_user mkdir -p "$USER_HOME/.config/pipewire/pipewire.conf.d"
-run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/pipewire/pipewire.conf.d/99-bluebard.conf" << EOF
+cat << EOF | run_as_user tee "$USER_HOME/.config/pipewire/pipewire.conf.d/99-bluebard.conf" > /dev/null
 {
     "context.properties": {
         "default.clock.rate": 48000,
