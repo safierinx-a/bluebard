@@ -137,7 +137,7 @@ run_as_root mkdir -p /etc/systemd/system/bluetooth.service.d
 run_as_root install -m 644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf << EOF
 [Service]
 ExecStart=
-ExecStart=$BLUETOOTHD_PATH
+ExecStart=$BLUETOOTHD_PATH --noplugin=sap
 EOF
 
 run_as_root install -m 644 /dev/stdin /etc/bluetooth/main.conf << EOF
@@ -163,7 +163,19 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
         "default.clock.quantum": 1024,
         "default.clock.min-quantum": 32,
         "default.clock.max-quantum": 8192
-    }
+    },
+    "pulse.properties.rules": [
+        {
+            "matches": [ { "device.name": "~bluez_*" } ],
+            "actions": {
+                "update-props": {
+                    "bluez5.autoswitch-profile": true,
+                    "bluez5.profile": "a2dp-sink",
+                    "bluez5.roles": [ "sink" ]
+                }
+            }
+        }
+    ]
 }
 EOF
 
@@ -177,7 +189,19 @@ cat << EOF | run_as_user tee "$USER_HOME/.config/pipewire/pipewire.conf.d/99-blu
         "default.clock.quantum": 1024,
         "default.clock.min-quantum": 32,
         "default.clock.max-quantum": 8192
-    }
+    },
+    "pulse.properties.rules": [
+        {
+            "matches": [ { "device.name": "~bluez_*" } ],
+            "actions": {
+                "update-props": {
+                    "bluez5.autoswitch-profile": true,
+                    "bluez5.profile": "a2dp-sink",
+                    "bluez5.roles": [ "sink" ]
+                }
+            }
+        }
+    ]
 }
 EOF
 
