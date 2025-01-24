@@ -52,16 +52,9 @@ echo "Checking for interfering services..."
 INTERFERING_SERVICES=()
 
 # Check system services
-for service in "audio-sync@*.service" "pulseaudio.service" "bluealsa.service"; do
+for service in "audio-sync@*.service" "bluealsa.service"; do
     if systemctl is-active $service &>/dev/null; then
         INTERFERING_SERVICES+=("$service (system)")
-    fi
-done
-
-# Check user services
-for service in "pulseaudio.service" "pulseaudio.socket"; do
-    if XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user is-active $service &>/dev/null; then
-        INTERFERING_SERVICES+=("$service (user)")
     fi
 done
 
@@ -75,12 +68,19 @@ if [ ${#INTERFERING_SERVICES[@]} -gt 0 ]; then
     exit 1
 fi
 
-# Remove existing audio packages first
-echo "Removing existing audio packages..."
+# Mask PulseAudio services to prevent them from starting
+echo "Masking PulseAudio services..."
+run_as_root systemctl mask pulseaudio.service pulseaudio.socket
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user mask pulseaudio.service pulseaudio.socket
+
+# Remove system-level PulseAudio service
+echo "Removing system-level PulseAudio service..."
+run_as_root rm -f /etc/systemd/system/pulseaudio.service
+run_as_root systemctl daemon-reload
+
+# Remove only conflicting packages
+echo "Removing conflicting packages..."
 run_as_root apt-get remove --purge -y \
-    pulseaudio \
-    pulseaudio-* \
-    libpulse* \
     bluealsa \
     bluealsa-* \
     libasound2-plugin-bluez || true
@@ -90,10 +90,7 @@ run_as_root apt-get autoremove -y
 # Clean up old configurations and state
 echo "Cleaning up old configurations..."
 run_as_root rm -rf \
-    /etc/pulse \
-    /etc/asound.conf \
     /etc/bluetooth/audio.conf \
-    /var/lib/pulse \
     /var/lib/bluealsa \
     /etc/systemd/system/bluealsa.service \
     /etc/systemd/system/bluealsa-aplay.service
@@ -101,9 +98,6 @@ run_as_root rm -rf \
 # Clean up user-specific audio configurations
 echo "Cleaning up user configurations..."
 run_as_user rm -rf \
-    "$USER_HOME/.config/pulse" \
-    "$USER_HOME/.pulse" \
-    "$USER_HOME/.pulse-cookie" \
     "$USER_HOME/.config/systemd/user/pulseaudio"*
 
 # Reload systemd to recognize removed packages
