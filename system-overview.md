@@ -6,40 +6,41 @@
 
 1. **Node Components**
 
-   - Audio Interface (ALSA/BlueALSA)
+   - PipeWire Audio Server
    - Bluetooth Interface
    - Node Manager
-   - Snapcast Client
+   - WirePlumber Session Manager
 
-2. **Central Components**
-   - Snapcast Server
+2. **Central Components** (Future)
    - MQTT Broker
    - Home Assistant Integration
 
 ### Audio Flow
 
 ```
-Bluetooth Device → BlueALSA → ALSA → Snapcast Client → Snapcast Server → Speakers
+Bluetooth Device → PipeWire Graph → Physical Outputs
+                 ↳ Multiple outputs with individual volume control
 ```
 
 ### State Management
 
 - Each node maintains its own state
-- Central server coordinates between nodes
-- Home Assistant provides user interface
+- PipeWire handles audio routing and mixing
+- Future: Central server for multi-room coordination
 
 ## Implementation Details
 
 ### Node Stack
 
 - Python async implementation
-- BlueALSA for Bluetooth audio
-- ALSA for audio routing
-- Snapcast for synchronized playback
+- PipeWire for audio routing and Bluetooth
+- Direct audio links for low latency
+- Individual volume control per output
 
 ### Features
 
 - Bluetooth device discovery and pairing
 - Signal strength monitoring
-- Volume control per device
-- Multi-room synchronization
+- Multiple simultaneous outputs
+- Independent volume control
+- Future: Multi-room synchronization
