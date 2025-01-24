@@ -47,8 +47,37 @@ run_as_root mkdir -p "$BACKUP_DIR"
 [ -f /etc/asound.conf ] && run_as_root cp /etc/asound.conf "$BACKUP_DIR/"
 [ -f /etc/bluetooth/main.conf ] && run_as_root cp /etc/bluetooth/main.conf "$BACKUP_DIR/"
 
+# Check for interfering services
+echo "Checking for interfering services..."
+INTERFERING_SERVICES=()
+
+# Check system services
+for service in "audio-sync@*.service" "pulseaudio.service" "bluealsa.service"; do
+    if systemctl is-active $service &>/dev/null; then
+        INTERFERING_SERVICES+=("$service (system)")
+    fi
+done
+
+# Check user services
+for service in "pulseaudio.service" "pulseaudio.socket"; do
+    if XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user is-active $service &>/dev/null; then
+        INTERFERING_SERVICES+=("$service (user)")
+    fi
+done
+
+if [ ${#INTERFERING_SERVICES[@]} -gt 0 ]; then
+    echo "Warning: Found potentially interfering services:"
+    printf '%s\n' "${INTERFERING_SERVICES[@]}"
+    echo "Please stop and disable these services before proceeding."
+    echo "You can use these commands:"
+    echo "  For system services: sudo systemctl stop SERVICE"
+    echo "  For user services: systemctl --user stop SERVICE"
+    exit 1
+fi
+
 # Stop all existing audio services
 echo "Stopping audio services..."
+# Stop PipeWire services
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire-pulse.service 2>/dev/null || true
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire.service 2>/dev/null || true
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop wireplumber.service 2>/dev/null || true
@@ -56,12 +85,8 @@ run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user d
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire.service 2>/dev/null || true
 run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable wireplumber.service 2>/dev/null || true
 
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pulseaudio.service pulseaudio.socket 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pulseaudio.service pulseaudio.socket 2>/dev/null || true
-run_as_root systemctl stop pulseaudio.service pulseaudio.socket 2>/dev/null || true
-run_as_root systemctl disable pulseaudio.service pulseaudio.socket 2>/dev/null || true
-run_as_root systemctl stop bluealsa.service 2>/dev/null || true
-run_as_root systemctl disable bluealsa.service 2>/dev/null || true
+# Reload systemd to recognize removed services
+run_as_root systemctl daemon-reload
 
 # Remove existing audio packages
 echo "Removing existing audio packages..."
