@@ -125,6 +125,21 @@ run_as_root mkdir -p /etc/bluetooth
 run_as_root chmod 555 /etc/bluetooth
 run_as_root chown root:root /etc/bluetooth
 
+# Update Bluetooth service to use correct daemon path
+echo "Configuring Bluetooth service..."
+BLUETOOTHD_PATH=$(command -v bluetoothd)
+if [ -z "$BLUETOOTHD_PATH" ]; then
+    echo "Error: bluetoothd not found. Please ensure bluez is installed correctly."
+    exit 1
+fi
+
+run_as_root mkdir -p /etc/systemd/system/bluetooth.service.d
+run_as_root install -m 644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf << EOF
+[Service]
+ExecStart=
+ExecStart=$BLUETOOTHD_PATH
+EOF
+
 run_as_root install -m 644 /dev/stdin /etc/bluetooth/main.conf << EOF
 [General]
 Class = 0x200414
