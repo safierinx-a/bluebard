@@ -75,20 +75,7 @@ if [ ${#INTERFERING_SERVICES[@]} -gt 0 ]; then
     exit 1
 fi
 
-# Stop all existing audio services
-echo "Stopping audio services..."
-# Stop PipeWire services
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire-pulse.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop wireplumber.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire-pulse.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable wireplumber.service 2>/dev/null || true
-
-# Reload systemd to recognize removed services
-run_as_root systemctl daemon-reload
-
-# Remove existing audio packages
+# Remove existing audio packages first
 echo "Removing existing audio packages..."
 run_as_root apt-get remove --purge -y \
     pulseaudio \
@@ -118,6 +105,19 @@ run_as_user rm -rf \
     "$USER_HOME/.pulse" \
     "$USER_HOME/.pulse-cookie" \
     "$USER_HOME/.config/systemd/user/pulseaudio"*
+
+# Reload systemd to recognize removed packages
+run_as_root systemctl daemon-reload
+
+# Stop all existing audio services
+echo "Stopping audio services..."
+# Stop PipeWire services
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire-pulse.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop wireplumber.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire-pulse.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire.service 2>/dev/null || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable wireplumber.service 2>/dev/null || true
 
 # Update package lists
 echo "Updating package lists..."
