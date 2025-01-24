@@ -9,16 +9,17 @@ from ..interfaces.bluetooth import BluetoothInterface
 
 
 class AudioTester:
-    def __init__(self):
+    def __init__(self, mode: str = "standalone"):
         self.logger = logging.getLogger("audio_test")
-        self.audio = AudioInterface()
+        self.mode = mode
+        self.audio = AudioInterface(mode=mode)
         self.bluetooth = BluetoothInterface()
-        self.connected_devices: Dict[str, dict] = {}  # All connected devices
-        self.device_routes: Dict[str, str] = {}  # MAC -> output device
-        self.outputs: Dict[str, dict] = {}  # Available audio outputs
+        self.connected_devices = {}
+        self.device_routes = {}
+        self.outputs = {}
 
     async def setup(self):
-        """Initialize interfaces and discover devices"""
+        """Initialize interfaces"""
         await self.audio.setup()
         await self.bluetooth.setup()
 
@@ -48,62 +49,46 @@ class AudioTester:
                 print(f"  → Volume: {int(vol * 100)}%")
 
     async def show_outputs(self):
-        """Show available audio outputs and their status"""
+        """Show available audio outputs"""
         print("\nAvailable outputs:")
         for name, info in self.outputs.items():
             vol = await self.audio.get_volume(name)
-            print(f"- {name} ({info['card_name']})")
+            print(f"- {name} ({info['name']})")
             if vol is not None:
                 print(f"  → Volume: {int(vol * 100)}%")
             else:
                 print("  → Volume: Not available")
-            # Show which devices are routed here
-            routed = [mac for mac, out in self.device_routes.items() if out == name]
-            if routed:
-                print("  → Connected devices:")
-                for mac in routed:
-                    device = self.connected_devices.get(mac, {})
-                    print(f"    - {device.get('name', mac)}")
 
-    async def handle_device_connect(self, mac: str, device_info: dict):
-        """Handle new device connection"""
-        self.connected_devices[mac] = device_info
-        name = device_info.get("name", mac)
-        self.logger.info(f"Device connected: {name}")
-        self.logger.info(f"Use 'route {mac} <output>' to route audio")
-        await self.show_outputs()
-
-    async def handle_device_disconnect(self, mac: str):
-        """Handle device disconnection"""
-        if mac in self.connected_devices:
-            name = self.connected_devices[mac].get("name", mac)
-            self.logger.info(f"Device disconnected: {name}")
-            del self.connected_devices[mac]
-            if mac in self.device_routes:
-                del self.device_routes[mac]
-
-    async def route_audio(self, mac: str, output: str):
+    async def route_audio(self, mac: str, output: str, add_to_existing: bool = False):
         """Route audio from device to specific output"""
         if mac not in self.connected_devices:
             raise ValueError(f"Device {mac} not connected")
         if output not in self.outputs:
             raise ValueError(f"Output {output} not available")
 
-        # Update routing
-        self.device_routes[mac] = output
+        if add_to_existing:
+            await self.audio.add_output_to_route(mac, output)
+            self.device_routes[mac] = f"{self.device_routes.get(mac, '')}+{output}"
+        else:
+            # Create new route
+            route_id = await self.audio.create_route(mac, output)
+            self.device_routes[mac] = output
+
         name = self.connected_devices[mac].get("name", mac)
         self.logger.info(f"Routing {name} → {output}")
 
-        # Configure audio chain
-        try:
-            # Set initial volume
-            await self.set_output_volume(output, 50)
-            # Test route with short tone
-            await self.test_output(output)
-        except Exception as e:
-            self.logger.error(f"Failed to configure route: {e}")
-            del self.device_routes[mac]
-            raise
+        # Set initial volume
+        await self.set_output_volume(output, 50)
+
+    async def set_output_volume(self, output: str, volume: float):
+        """Set volume for a specific output"""
+        if output not in self.outputs:
+            raise ValueError(f"Output {output} not available")
+        if not 0 <= volume <= 100:
+            raise ValueError("Volume must be between 0 and 100")
+
+        await self.audio.set_volume(output, volume / 100)
+        self.logger.info(f"Set {output} volume to {volume}%")
 
     async def test_output(self, output: str, duration: int = 1):
         """Test an output with a short tone"""
@@ -118,82 +103,54 @@ class AudioTester:
         except subprocess.TimeoutExpired:
             pass
 
-    async def set_device_volume(self, mac: str, volume: float):
-        """Set volume for a specific device's output"""
-        if mac not in self.connected_devices:
-            raise ValueError(f"Device {mac} not connected")
-        if not 0 <= volume <= 100:
-            raise ValueError("Volume must be between 0 and 100")
-
-        output = self.device_routes.get(mac)
-        if not output:
-            raise ValueError(f"Device {mac} not routed to any output")
-
-        await self.set_output_volume(output, volume)
-        name = self.connected_devices[mac].get("name", mac)
-        self.logger.info(f"Set volume for {name} → {output}: {volume}%")
-
-    async def set_output_volume(self, output: str, volume: float):
-        """Set volume for a specific output"""
-        if output not in self.outputs:
-            raise ValueError(f"Output {output} not available")
-        if not 0 <= volume <= 100:
-            raise ValueError("Volume must be between 0 and 100")
-
-        await self.audio.set_volume(output, volume / 100)
-        self.logger.info(f"Set {output} volume to {volume}%")
-
-    async def test_all(self):
-        """Test all available outputs"""
-        print("\nTesting all outputs...")
-        for output in self.outputs:
-            print(f"\nTesting {output}:")
-            print("1. Setting volume to 50%")
-            await self.set_output_volume(output, 50)
-            print("2. Playing test tone")
-            await self.test_output(output)
-            print("3. Resetting volume")
-            await self.set_output_volume(output, 0)
-
     async def interactive_mode(self):
         """Interactive testing mode"""
-        print("\nBluebard Audio Tester")
+        mode_str = (
+            "Standalone Mode" if self.mode == "standalone" else "Distributed Mode"
+        )
+        print(f"\nBluebard Audio Tester ({mode_str})")
         print("\nCommands:")
-        print("s: Show connected devices")
-        print("o: Show available outputs")
-        print("r: Show current routing")
-        print("route <mac> <output>: Route device to output")
-        print("v <mac> <0-100>: Set device volume")
-        print("m <output> <0-100>: Set output volume")
-        print("t: Test all outputs")
+        print("d: Show available audio devices")
+        print("b: Show connected Bluetooth devices")
+        print("r <mac> <device>: Route Bluetooth to device")
+        print("a <mac> <device>: Add another output to existing route")
+        print("v <device> <0-100>: Set device volume")
+        print("t <device>: Test audio output")
         print("h: Show this help")
         print("q: Quit")
 
         while True:
             try:
-                cmd = input("\n> ").strip()
-                if cmd == "q":
+                cmd = input("\n> ").strip().split()
+                if not cmd:
+                    continue
+
+                if cmd[0] == "q":
                     break
-                elif cmd == "s":
-                    await self.show_devices()
-                elif cmd == "o":
+                elif cmd[0] == "d":
                     await self.show_outputs()
-                elif cmd == "r":
+                elif cmd[0] == "b":
                     await self.show_devices()
-                    await self.show_outputs()
-                elif cmd == "t":
-                    await self.test_all()
-                elif cmd == "h":
-                    await self.interactive_mode()
-                elif cmd.startswith("route "):
-                    _, mac, output = cmd.split()
-                    await self.route_audio(mac, output)
-                elif cmd.startswith("v "):
-                    _, mac, vol = cmd.split()
-                    await self.set_device_volume(mac, float(vol))
-                elif cmd.startswith("m "):
-                    _, output, vol = cmd.split()
-                    await self.set_output_volume(output, float(vol))
+                elif cmd[0] == "r" and len(cmd) == 3:
+                    await self.route_audio(cmd[1], cmd[2], add_to_existing=False)
+                elif cmd[0] == "a" and len(cmd) == 3:
+                    await self.route_audio(cmd[1], cmd[2], add_to_existing=True)
+                elif cmd[0] == "v" and len(cmd) == 3:
+                    await self.set_output_volume(cmd[1], float(cmd[2]))
+                elif cmd[0] == "t" and len(cmd) == 2:
+                    await self.test_output(cmd[1])
+                elif cmd[0] == "h":
+                    print("\nCommands:")
+                    print("d: Show available audio devices")
+                    print("b: Show connected Bluetooth devices")
+                    print("r <mac> <device>: Route Bluetooth to device")
+                    print("a <mac> <device>: Add another output to existing route")
+                    print("v <device> <0-100>: Set device volume")
+                    print("t <device>: Test audio output")
+                    print("h: Show this help")
+                    print("q: Quit")
+                else:
+                    print("Unknown command. Type 'h' for help.")
             except Exception as e:
                 self.logger.error(f"Command failed: {e}")
 
@@ -201,16 +158,13 @@ class AudioTester:
         """Clean up resources"""
         # Reset all volumes
         for output in self.outputs:
-            # Skip HDMI if no control
-            if "hdmi" in self.outputs[output]["card_name"].lower():
-                continue
             try:
                 await self.set_output_volume(output, 0)
             except Exception as e:
                 self.logger.error(f"Failed to reset {output} volume: {e}")
 
-        # Clean up interfaces
         await self.bluetooth.cleanup()
+        await self.audio.cleanup()
         self.logger.info("Cleanup complete")
 
 
