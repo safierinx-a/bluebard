@@ -58,6 +58,15 @@ for service in "audio-sync@*.service" "bluealsa.service"; do
     fi
 done
 
+# Check if audio-sync service exists and warn about it
+if systemctl list-unit-files "audio-sync@*.service" &>/dev/null; then
+    echo "Warning: Found old audio-sync service. Please remove it with:"
+    echo "  sudo systemctl stop audio-sync@*.service"
+    echo "  sudo systemctl disable audio-sync@*.service"
+    echo "  sudo rm /etc/systemd/system/audio-sync@*.service"
+    exit 1
+fi
+
 if [ ${#INTERFERING_SERVICES[@]} -gt 0 ]; then
     echo "Warning: Found potentially interfering services:"
     printf '%s\n' "${INTERFERING_SERVICES[@]}"
@@ -67,6 +76,18 @@ if [ ${#INTERFERING_SERVICES[@]} -gt 0 ]; then
     echo "  For user services: systemctl --user stop SERVICE"
     exit 1
 fi
+
+# Ensure PipeWire cache directory exists with correct permissions
+echo "Setting up PipeWire cache directory..."
+run_as_root mkdir -p /var/cache/pipewire
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /var/cache/pipewire
+run_as_root chmod 700 /var/cache/pipewire
+
+# Also ensure XDG_RUNTIME_DIR exists and has correct permissions
+echo "Setting up runtime directory..."
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")
 
 # Mask PulseAudio services to prevent them from starting
 echo "Masking PulseAudio services..."
