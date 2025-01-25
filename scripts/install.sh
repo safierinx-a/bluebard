@@ -77,17 +77,35 @@ if [ ${#INTERFERING_SERVICES[@]} -gt 0 ]; then
     exit 1
 fi
 
-# Ensure PipeWire cache directory exists with correct permissions
-echo "Setting up PipeWire cache directory..."
+# Set up PipeWire directories and permissions
+echo "Setting up PipeWire directories..."
+# System directories
 run_as_root mkdir -p /var/cache/pipewire
 run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /var/cache/pipewire
 run_as_root chmod 700 /var/cache/pipewire
 
-# Also ensure XDG_RUNTIME_DIR exists and has correct permissions
-echo "Setting up runtime directory..."
+# User directories
+run_as_user mkdir -p "$USER_HOME/.local/state/pipewire"
+run_as_user mkdir -p "$USER_HOME/.local/share/pipewire"
+run_as_user mkdir -p "$USER_HOME/.config/pipewire"
+
+# Runtime directories
 run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chown -R "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")
 run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
+
+# Clear any remaining sockets and state
+echo "Cleaning up existing PipeWire state..."
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse || true
+run_as_user rm -rf "$USER_HOME/.local/state/pipewire/"* || true
+
+# Reset systemd state
+echo "Resetting systemd state..."
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user daemon-reload
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user reset-failed
 
 # Mask PulseAudio services to prevent them from starting
 echo "Masking PulseAudio services..."
@@ -219,9 +237,29 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
         "default.clock.min-quantum": 32,
         "default.clock.max-quantum": 8192,
         "support.dbus": true,
-        "log.level": 2
+        "log.level": 2,
+        "mem.allow-mlock": true,
+        "core.daemon": true,
+        "core.name": "pipewire-0",
+        "vm.overrides": {
+            "default.clock.min-quantum": 512
+        }
+    },
+    "context.spa-libs": {
+        "audio.convert.*": "audioconvert/libspa-audioconvert",
+        "support.*": "support/libspa-support"
     },
     "context.modules": [
+        {
+            "name": "libpipewire-module-rt",
+            "args": {
+                "nice.level": -11,
+                "rt.prio": 88,
+                "rt.time.soft": 200000,
+                "rt.time.hard": 200000
+            },
+            "flags": [ "ifexists", "nofail" ]
+        },
         {
             "name": "libpipewire-module-protocol-native"
         },
@@ -241,7 +279,7 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
     "pulse.properties": {
         "server.address": [ "unix:/run/user/$(id -u "$ACTUAL_USER")/pulse/native" ]
     },
-    "pulse.properties.rules": [
+    "pulse.rules": [
         {
             "matches": [ { "device.name": "~bluez_*" } ],
             "actions": {
@@ -252,7 +290,9 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
                     "bluez5.reconnect-profiles": [ "a2dp_sink", "headset_head_unit" ],
                     "bluez5.codecs": [ "aac", "sbc_xq", "sbc" ],
                     "api.alsa.period-size": 1024,
-                    "api.alsa.headroom": 8192
+                    "api.alsa.headroom": 8192,
+                    "api.alsa.disable-mmap": true,
+                    "session.suspend-timeout-seconds": 0
                 }
             }
         }
@@ -269,7 +309,10 @@ bluez_monitor.properties = {
   ["bluez5.enable-msbc"] = true,
   ["bluez5.enable-hw-volume"] = true,
   ["bluez5.headset-roles"] = "[ sink, source ]",
-  ["bluez5.hfphsp-backend"] = "native"
+  ["bluez5.hfphsp-backend"] = "native",
+  ["bluez5.a2dp.ldac.quality"] = "auto",
+  ["bluez5.a2dp.aac.bitratemode"] = 0,
+  ["bluez5.a2dp.aac.quality"] = 5
 }
 
 stream.properties = {
@@ -277,55 +320,80 @@ stream.properties = {
   ["resample.disable"] = false,
   ["channelmix.normalize"] = true,
   ["channelmix.mix-lfe"] = false,
-  ["dither.noise"] = -90
+  ["dither.noise"] = -90,
+  ["clock.quantum-limit"] = 8192
 }
+
+alsa_monitor.properties = {
+  ["alsa.jack-device"] = false,
+  ["alsa.reserve"] = true,
+  ["alsa.support-audio-fallback"] = true
+}
+EOF
+
+# Ensure systemd user service directory exists
+echo "Setting up systemd user service directory..."
+run_as_user mkdir -p "$USER_HOME/.config/systemd/user"
+
+# Configure systemd user service environment
+echo "Configuring systemd user environment..."
+run_as_user mkdir -p "$USER_HOME/.config/environment.d"
+run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/environment.d/pipewire.conf" << EOF
+PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
+PULSE_RUNTIME_PATH=/run/user/$(id -u "$ACTUAL_USER")/pulse
+XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
 EOF
 
 # Reset any failed services before starting
 echo "Resetting service states..."
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user reset-failed pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service filter-chain.service || true
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user daemon-reload
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user reset-failed
 
-# Enable and start PipeWire for the user
-echo "Setting up PipeWire services..."
-
-# First stop everything in reverse order
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire-pulse.service pipewire-pulse.socket filter-chain.service wireplumber.service pipewire.service pipewire.socket || true
+# Stop all services first
+echo "Stopping existing services..."
+run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire pipewire-pulse wireplumber 2>/dev/null || true
 
 # Clear any remaining sockets
-run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
-run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse || true
+echo "Cleaning up existing sockets..."
+run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
+run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pulse/* || true
 
-# Enable services
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.socket
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire.service
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable wireplumber.service
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire-pulse.socket
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user enable pipewire-pulse.service
-
-# Start in correct order with proper delays
+# Start services in correct order
 echo "Starting PipeWire services..."
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire.socket
-sleep 2  # Give socket time to initialize
+export XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
 
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire.service
-sleep 2  # Give PipeWire time to initialize
+# Enable and start socket activation first
+run_as_user systemctl --user enable --now pipewire.socket
+sleep 2
 
-# Check if PipeWire started successfully
-if ! run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user is-active pipewire.service > /dev/null 2>&1; then
+# Start main services
+run_as_user systemctl --user enable --now pipewire.service
+sleep 2
+
+if ! run_as_user systemctl --user is-active pipewire.service >/dev/null 2>&1; then
     echo "Error: PipeWire failed to start. Checking logs..."
-    run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") journalctl --user -u pipewire.service --no-pager -n 50
+    run_as_user systemctl --user status pipewire.service
+    run_as_user journalctl --user -u pipewire.service --no-pager -n 50
     exit 1
 fi
 
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start wireplumber.service
-sleep 2  # Give WirePlumber time to initialize
+run_as_user systemctl --user enable --now wireplumber.service
+sleep 2
 
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire-pulse.socket
+run_as_user systemctl --user enable --now pipewire-pulse.socket
 sleep 1
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start pipewire-pulse.service
+run_as_user systemctl --user enable --now pipewire-pulse.service
 
-# Remove filter-chain for now as it's causing issues
-# run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user start filter-chain.service
+# Verify service status
+echo "Verifying service status..."
+for service in pipewire.service wireplumber.service pipewire-pulse.service; do
+    if ! run_as_user systemctl --user is-active $service >/dev/null 2>&1; then
+        echo "Warning: $service is not running"
+        run_as_user systemctl --user status $service
+    else
+        echo "$service is running"
+    fi
+done
 
 # Add user to required groups
 echo "Adding user to required groups..."
