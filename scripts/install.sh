@@ -331,58 +331,74 @@ alsa_monitor.properties = {
 }
 EOF
 
-# Ensure systemd user service directory exists
-echo "Setting up systemd user service directory..."
-run_as_user mkdir -p "$USER_HOME/.config/systemd/user"
-
 # Configure systemd user service environment
 echo "Configuring systemd user environment..."
 run_as_user mkdir -p "$USER_HOME/.config/environment.d"
-run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/environment.d/pipewire.conf" << EOF
+
+# Create environment file with proper permissions
+cat << EOF > /tmp/pipewire.conf.tmp
 PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
 PULSE_RUNTIME_PATH=/run/user/$(id -u "$ACTUAL_USER")/pulse
 XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u "$ACTUAL_USER")/bus
 EOF
+
+run_as_root install -m 644 /tmp/pipewire.conf.tmp "$USER_HOME/.config/environment.d/pipewire.conf"
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" "$USER_HOME/.config/environment.d/pipewire.conf"
+rm -f /tmp/pipewire.conf.tmp
+
+# Ensure D-Bus session is available
+echo "Setting up D-Bus session..."
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/bus
+run_as_root chown -R "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")
+run_as_root chmod -R 700 /run/user/$(id -u "$ACTUAL_USER")
+
+# Export required environment variables for the installation process
+export XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u "$ACTUAL_USER")/bus
+
+# Start D-Bus session if not running
+if ! run_as_user dbus-launch --sh-syntax > /dev/null 2>&1; then
+    echo "Starting D-Bus session..."
+    eval $(run_as_user dbus-launch --sh-syntax)
+fi
 
 # Reset any failed services before starting
 echo "Resetting service states..."
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user daemon-reload
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user reset-failed
+run_as_user systemctl --user daemon-reload || true
+run_as_user systemctl --user reset-failed || true
 
 # Stop all services first
 echo "Stopping existing services..."
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire pipewire-pulse wireplumber 2>/dev/null || true
+run_as_user systemctl --user stop pipewire pipewire-pulse wireplumber 2>/dev/null || true
 
 # Clear any remaining sockets
 echo "Cleaning up existing sockets..."
 run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
 run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pulse/* || true
 
-# Start services in correct order
+# Start services in correct order with proper environment
 echo "Starting PipeWire services..."
-export XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
-
-# Enable and start socket activation first
-run_as_user systemctl --user enable --now pipewire.socket
+run_as_user bash -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus && systemctl --user enable --now pipewire.socket'
 sleep 2
 
-# Start main services
-run_as_user systemctl --user enable --now pipewire.service
+run_as_user bash -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus && systemctl --user enable --now pipewire.service'
 sleep 2
 
-if ! run_as_user systemctl --user is-active pipewire.service >/dev/null 2>&1; then
+# Check PipeWire status with proper environment
+if ! run_as_user bash -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus && systemctl --user is-active pipewire.service' >/dev/null 2>&1; then
     echo "Error: PipeWire failed to start. Checking logs..."
-    run_as_user systemctl --user status pipewire.service
-    run_as_user journalctl --user -u pipewire.service --no-pager -n 50
+    run_as_user bash -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus && systemctl --user status pipewire.service'
+    run_as_user bash -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus && journalctl --user -u pipewire.service --no-pager -n 50'
     exit 1
 fi
 
-run_as_user systemctl --user enable --now wireplumber.service
+run_as_user bash -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus && systemctl --user enable --now wireplumber.service'
 sleep 2
 
-run_as_user systemctl --user enable --now pipewire-pulse.socket
+run_as_user bash -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus && systemctl --user enable --now pipewire-pulse.socket'
 sleep 1
-run_as_user systemctl --user enable --now pipewire-pulse.service
+run_as_user bash -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus && systemctl --user enable --now pipewire-pulse.service'
 
 # Verify service status
 echo "Verifying service status..."
