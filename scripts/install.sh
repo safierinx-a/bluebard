@@ -284,10 +284,7 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
         "log.level": 2,
         "mem.allow-mlock": true,
         "core.daemon": true,
-        "core.name": "pipewire-0",
-        "vm.overrides": {
-            "default.clock.min-quantum": 512
-        }
+        "core.name": "pipewire-0"
     },
     "context.spa-libs": {
         "audio.convert.*": "audioconvert/libspa-audioconvert",
@@ -323,7 +320,7 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
     "pulse.properties": {
         "server.address": [ "unix:/run/user/$(id -u "$ACTUAL_USER")/pulse/native" ]
     },
-    "pulse.rules": [
+    "pulse.properties.rules": [
         {
             "matches": [ { "device.name": "~bluez_*" } ],
             "actions": {
@@ -348,6 +345,8 @@ EOF
 echo "Setting up WirePlumber configuration..."
 run_as_root mkdir -p /etc/wireplumber/main.lua.d
 run_as_root install -m 644 /dev/stdin /etc/wireplumber/main.lua.d/51-bluebard.lua << EOF
+local bluez_monitor = {}
+
 bluez_monitor.properties = {
   ["bluez5.enable-sbc-xq"] = true,
   ["bluez5.enable-msbc"] = true,
@@ -359,6 +358,8 @@ bluez_monitor.properties = {
   ["bluez5.a2dp.aac.quality"] = 5
 }
 
+local stream = {}
+
 stream.properties = {
   ["resample.quality"] = 7,
   ["resample.disable"] = false,
@@ -368,12 +369,29 @@ stream.properties = {
   ["clock.quantum-limit"] = 8192
 }
 
+local alsa_monitor = {}
+
 alsa_monitor.properties = {
   ["alsa.jack-device"] = false,
   ["alsa.reserve"] = true,
   ["alsa.support-audio-fallback"] = true
 }
+
+return {
+  ["bluez_monitor"] = bluez_monitor,
+  ["stream"] = stream,
+  ["alsa_monitor"] = alsa_monitor
+}
 EOF
+
+# Ensure cache directories exist with correct permissions
+echo "Setting up PipeWire cache directories..."
+run_as_root mkdir -p /var/cache/pipewire
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /var/cache/pipewire
+run_as_root chmod 700 /var/cache/pipewire
+
+run_as_user mkdir -p "$USER_HOME/.cache/pipewire"
+run_as_user mkdir -p "$USER_HOME/.local/state/pipewire"
 
 # Verify service status
 echo "Verifying service status..."
