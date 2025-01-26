@@ -398,7 +398,8 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
     },
     "context.spa-libs": {
         "audio.convert.*": "audioconvert/libspa-audioconvert",
-        "support.*": "support/libspa-support"
+        "support.*": "support/libspa-support",
+        "api.bluez5.*": "bluez5/libspa-bluez5"
     },
     "context.modules": [
         {
@@ -412,25 +413,42 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
             "flags": [ "ifexists", "nofail" ]
         },
         {
-            "name": "libpipewire-module-protocol-native"
+            "name": "libpipewire-module-protocol-native",
+            "flags": [ "nofail" ]
         },
         {
-            "name": "libpipewire-module-client-node"
+            "name": "libpipewire-module-client-node",
+            "flags": [ "nofail" ]
         },
         {
-            "name": "libpipewire-module-adapter"
+            "name": "libpipewire-module-adapter",
+            "flags": [ "nofail" ]
         },
         {
-            "name": "libpipewire-module-metadata"
+            "name": "libpipewire-module-metadata",
+            "flags": [ "nofail" ]
         },
         {
-            "name": "libpipewire-module-session-manager"
+            "name": "libpipewire-module-portal",
+            "flags": [ "ifexists", "nofail" ]
+        },
+        {
+            "name": "libpipewire-module-access",
+            "args": {},
+            "flags": [ "ifexists", "nofail" ]
         }
     ],
+    "stream.properties": {
+        "resample.quality": 7,
+        "resample.disable": false,
+        "channelmix.normalize": true,
+        "channelmix.mix-lfe": false,
+        "dither.noise": -90
+    },
     "pulse.properties": {
         "server.address": [ "unix:/run/user/$(id -u "$ACTUAL_USER")/pulse/native" ]
     },
-    "pulse.properties.rules": [
+    "pulse.rules": [
         {
             "matches": [ { "device.name": "~bluez_*" } ],
             "actions": {
@@ -468,6 +486,22 @@ bluez_monitor.properties = {
   ["bluez5.a2dp.aac.quality"] = 5
 }
 
+bluez_monitor.rules = {
+    {
+        matches = {
+            {
+                { "device.name", "matches", "bluez_card.*" },
+            },
+        },
+        apply_properties = {
+            ["bluez5.reconnect-profiles"] = { "a2dp_sink", "hfp_hf" },
+            ["bluez5.headset-roles"] = { "hfp_hf", "hsp_hs" },
+            ["bluez5.auto-connect"] = true,
+            ["bluez5.hw-volume"] = true
+        }
+    }
+}
+
 local stream = {}
 
 stream.properties = {
@@ -484,7 +518,26 @@ local alsa_monitor = {}
 alsa_monitor.properties = {
   ["alsa.jack-device"] = false,
   ["alsa.reserve"] = true,
-  ["alsa.support-audio-fallback"] = true
+  ["alsa.support-audio-fallback"] = true,
+  ["alsa.midi-driver"] = "none"
+}
+
+alsa_monitor.rules = {
+    {
+        matches = {
+            {
+                { "node.name", "matches", "alsa_output.*" },
+            },
+        },
+        apply_properties = {
+            ["audio.format"] = "S32LE",
+            ["audio.rate"] = 48000,
+            ["audio.channels"] = 2,
+            ["audio.position"] = "FL,FR",
+            ["api.alsa.period-size"] = 1024,
+            ["api.alsa.headroom"] = 8192
+        }
+    }
 }
 
 return {
@@ -529,4 +582,55 @@ fi
 
 echo "Installation complete!"
 echo "NOTE: You may need to log out and log back in for group changes to take effect."
-echo "To test the setup, run: python3 -m bluebard.tools.test_audio" 
+echo "To test the setup, run: python3 -m bluebard.tools.test_audio"
+
+# Add a delay before starting services
+sleep 2
+
+# Stop and reset all PipeWire-related services
+echo "Resetting PipeWire services..."
+run_systemctl "stop pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
+run_systemctl "reset-failed"
+
+# Clean up ALL runtime files
+echo "Cleaning up runtime files..."
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-*
+run_as_user rm -rf "$USER_HOME/.local/state/pipewire/"*
+run_as_user rm -rf "$USER_HOME/.cache/pipewire/"*
+
+# Recreate directories with proper permissions
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pulse
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pulse
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pulse
+
+# Reload systemd configuration
+run_systemctl "daemon-reload"
+
+# Start services in strict order with longer delays
+echo "Starting PipeWire services..."
+run_systemctl "enable --now pipewire.socket"
+sleep 3
+run_systemctl "enable --now pipewire.service"
+sleep 5
+
+# Verify PipeWire is running before continuing
+if ! run_systemctl "is-active pipewire.service"; then
+    echo "Error: PipeWire failed to start. Checking logs..."
+    run_systemctl "status pipewire.service"
+    exit 1
+fi
+
+echo "Starting WirePlumber..."
+run_systemctl "enable --now wireplumber.service"
+sleep 3
+
+echo "Starting PipeWire-PulseAudio services..."
+run_systemctl "enable --now pipewire-pulse.socket"
+sleep 2
+run_systemctl "enable --now pipewire-pulse.service"
+sleep 3 
