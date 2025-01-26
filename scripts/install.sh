@@ -88,32 +88,34 @@ run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")
 # Set up D-Bus session
 echo "Setting up D-Bus session..."
 
-# Check if D-Bus session is already running
-DBUS_SESSION_BUS_PID=$(run_as_user pgrep -f "dbus-daemon.*--session" || true)
-if [ -n "$DBUS_SESSION_BUS_PID" ]; then
-    echo "Found existing D-Bus session (PID: $DBUS_SESSION_BUS_PID)"
-    # Get the existing D-Bus address
-    export DBUS_SESSION_BUS_ADDRESS=$(run_as_user grep -z DBUS_SESSION_BUS_ADDRESS /proc/$DBUS_SESSION_BUS_PID/environ | cut -d= -f2-)
+# Try to get existing D-Bus session
+if [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    echo "Using existing D-Bus session: $DBUS_SESSION_BUS_ADDRESS"
 else
-    echo "Starting new D-Bus session..."
-    # Kill any existing dbus-daemon processes for this user
-    run_as_user pkill -f "dbus-daemon.*--session" || true
-    sleep 1
-    
-    # Clean up existing socket
-    run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/bus || true
-    
-    # Start new D-Bus session
-    eval $(run_as_user dbus-launch --sh-syntax)
-    sleep 2
+    # Check if we can connect to an existing session
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$ACTUAL_USER")/bus"
+    if run_as_user dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+        echo "Connected to existing D-Bus session"
+        export DBUS_SESSION_BUS_ADDRESS
+    else
+        echo "Starting new D-Bus session..."
+        # Only create a new session if we can't connect to an existing one
+        DBUS_LAUNCH_OUTPUT=$(run_as_user dbus-launch --sh-syntax)
+        if [ $? -eq 0 ]; then
+            eval "$DBUS_LAUNCH_OUTPUT"
+            echo "D-Bus session started successfully"
+        else
+            echo "Error: Failed to start D-Bus session"
+            exit 1
+        fi
+    fi
 fi
 
 # Verify D-Bus session
-if ! run_as_user dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
-    echo "Error: D-Bus session is not working properly"
+echo "Verifying D-Bus session..."
+if ! run_as_user bash -c "export DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS' && dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames" >/dev/null 2>&1; then
+    echo "Error: D-Bus session verification failed"
     exit 1
-else
-    echo "D-Bus session is working properly"
 fi
 
 # Export the D-Bus session address for systemd user services
@@ -127,7 +129,7 @@ run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" "$USER_HOME/.config/environment.d/
 rm -f /tmp/dbus.conf.tmp
 
 # Export for current session
-export DBUS_SESSION_BUS_ADDRESS
+export XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
 
 # Set up user config directories
 run_as_user mkdir -p "$USER_HOME/.local/state/pipewire"
