@@ -202,17 +202,40 @@ run_systemctl() {
 # Reset failed units first
 run_systemctl "reset-failed"
 
-# Stop any running services
-run_systemctl "stop pipewire pipewire-pulse wireplumber"
+# Stop all services and clean up thoroughly
+echo "Stopping all audio services and cleaning up..."
+run_systemctl "stop pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
+sleep 2
 
-# Start services in order
+# Clean up ALL potential conflicting files
+echo "Cleaning up PipeWire state..."
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse/* || true
+run_as_user rm -rf "$USER_HOME/.local/state/pipewire/"* || true
+run_as_user rm -rf "$USER_HOME/.cache/pipewire/"* || true
+
+# Ensure the runtime directory is empty and has correct permissions
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
+
+# Reload systemd to clear any cached state
+run_systemctl "daemon-reload"
+
+# Start services in order with proper delays
+echo "Starting PipeWire services..."
+
+# Start with sockets first
 echo "Starting PipeWire socket..."
-run_systemctl "enable --now pipewire.socket"
+run_systemctl "enable pipewire.socket"
+run_systemctl "start pipewire.socket"
 sleep 2
 
 echo "Starting PipeWire service..."
-run_systemctl "enable --now pipewire.service"
-sleep 2
+run_systemctl "enable pipewire.service"
+run_systemctl "start pipewire.service"
+sleep 3
 
 # Check if PipeWire started successfully
 if ! run_systemctl "is-active pipewire.service"; then
@@ -222,14 +245,17 @@ if ! run_systemctl "is-active pipewire.service"; then
 fi
 
 echo "Starting WirePlumber..."
-run_systemctl "enable --now wireplumber.service"
-sleep 2
+run_systemctl "enable wireplumber.service"
+run_systemctl "start wireplumber.service"
+sleep 3
 
 echo "Starting PipeWire-PulseAudio services..."
-run_systemctl "enable --now pipewire-pulse.socket"
-sleep 1
-run_systemctl "enable --now pipewire-pulse.service"
+run_systemctl "enable pipewire-pulse.socket"
+run_systemctl "start pipewire-pulse.socket"
 sleep 2
+run_systemctl "enable pipewire-pulse.service"
+run_systemctl "start pipewire-pulse.service"
+sleep 3
 
 # Verify all services
 echo "Verifying services..."
