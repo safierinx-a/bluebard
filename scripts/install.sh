@@ -87,22 +87,47 @@ run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")
 
 # Set up D-Bus session
 echo "Setting up D-Bus session..."
-run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/bus
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/bus
-run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/bus
 
-# Create PipeWire specific directories
-run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pulse
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pulse
-run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pulse
+# Check if D-Bus session is already running
+DBUS_SESSION_BUS_PID=$(run_as_user pgrep -f "dbus-daemon.*--session" || true)
+if [ -n "$DBUS_SESSION_BUS_PID" ]; then
+    echo "Found existing D-Bus session (PID: $DBUS_SESSION_BUS_PID)"
+    # Get the existing D-Bus address
+    export DBUS_SESSION_BUS_ADDRESS=$(run_as_user grep -z DBUS_SESSION_BUS_ADDRESS /proc/$DBUS_SESSION_BUS_PID/environ | cut -d= -f2-)
+else
+    echo "Starting new D-Bus session..."
+    # Kill any existing dbus-daemon processes for this user
+    run_as_user pkill -f "dbus-daemon.*--session" || true
+    sleep 1
+    
+    # Clean up existing socket
+    run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/bus || true
+    
+    # Start new D-Bus session
+    eval $(run_as_user dbus-launch --sh-syntax)
+    sleep 2
+fi
 
-# Set up cache directories
-run_as_root mkdir -p /var/cache/pipewire
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /var/cache/pipewire
-run_as_root chmod 700 /var/cache/pipewire
+# Verify D-Bus session
+if ! run_as_user dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+    echo "Error: D-Bus session is not working properly"
+    exit 1
+else
+    echo "D-Bus session is working properly"
+fi
+
+# Export the D-Bus session address for systemd user services
+run_as_user mkdir -p "$USER_HOME/.config/environment.d"
+cat << EOF > /tmp/dbus.conf.tmp
+DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS}
+EOF
+
+run_as_root install -m 644 /tmp/dbus.conf.tmp "$USER_HOME/.config/environment.d/dbus.conf"
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" "$USER_HOME/.config/environment.d/dbus.conf"
+rm -f /tmp/dbus.conf.tmp
+
+# Export for current session
+export DBUS_SESSION_BUS_ADDRESS
 
 # Set up user config directories
 run_as_user mkdir -p "$USER_HOME/.local/state/pipewire"
@@ -112,7 +137,6 @@ run_as_user mkdir -p "$USER_HOME/.config/systemd/user"
 
 # Export required environment variables
 export XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
-export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u "$ACTUAL_USER")/bus
 
 # Start D-Bus session if not running
 echo "Starting D-Bus session..."
@@ -147,13 +171,51 @@ run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pulse/* || true
 
 # Start services in correct order
 echo "Starting PipeWire services..."
-for cmd in "enable --now pipewire.socket" \
-          "enable --now pipewire.service" \
-          "enable --now wireplumber.service" \
-          "enable --now pipewire-pulse.socket" \
-          "enable --now pipewire-pulse.service"; do
-    run_as_user bash -c "export XDG_RUNTIME_DIR=/run/user/\$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus && systemctl --user $cmd"
-    sleep 2
+
+# Function to run systemctl with proper environment
+run_systemctl() {
+    run_as_user bash -c "export XDG_RUNTIME_DIR=/run/user/\$(id -u) DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS' && systemctl --user $1"
+}
+
+# Reset failed units first
+run_systemctl "reset-failed"
+
+# Stop any running services
+run_systemctl "stop pipewire pipewire-pulse wireplumber"
+
+# Start services in order
+echo "Starting PipeWire socket..."
+run_systemctl "enable --now pipewire.socket"
+sleep 2
+
+echo "Starting PipeWire service..."
+run_systemctl "enable --now pipewire.service"
+sleep 2
+
+# Check if PipeWire started successfully
+if ! run_systemctl "is-active pipewire.service"; then
+    echo "Error: PipeWire failed to start. Checking logs..."
+    run_systemctl "status pipewire.service"
+    exit 1
+fi
+
+echo "Starting WirePlumber..."
+run_systemctl "enable --now wireplumber.service"
+sleep 2
+
+echo "Starting PipeWire-PulseAudio services..."
+run_systemctl "enable --now pipewire-pulse.socket"
+sleep 1
+run_systemctl "enable --now pipewire-pulse.service"
+sleep 2
+
+# Verify all services
+echo "Verifying services..."
+for service in pipewire.service wireplumber.service pipewire-pulse.service; do
+    if ! run_systemctl "is-active $service"; then
+        echo "Warning: $service failed to start"
+        run_systemctl "status $service"
+    fi
 done
 
 # Remove system-level PulseAudio service
