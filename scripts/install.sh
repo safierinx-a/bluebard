@@ -191,53 +191,93 @@ echo "Cleaning up existing sockets..."
 run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
 run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pulse/* || true
 
-# Start services in correct order
-echo "Starting PipeWire services..."
-
-# Function to run systemctl with proper environment
-run_systemctl() {
-    run_as_user bash -c "export XDG_RUNTIME_DIR=/run/user/\$(id -u) DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS' && systemctl --user $1"
-}
-
-# Reset failed units first
-run_systemctl "reset-failed"
-
-# Stop all services and clean up thoroughly
-echo "Stopping all audio services and cleaning up..."
-run_systemctl "stop pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
+# Kill any existing PipeWire processes first
+echo "Ensuring no PipeWire processes are running..."
+run_as_user pkill -9 pipewire 2>/dev/null || true
+run_as_user pkill -9 wireplumber 2>/dev/null || true
 sleep 2
 
-# Clean up ALL potential conflicting files
-echo "Cleaning up PipeWire state..."
-run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
-run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse/* || true
-run_as_user rm -rf "$USER_HOME/.local/state/pipewire/"* || true
-run_as_user rm -rf "$USER_HOME/.cache/pipewire/"* || true
-
-# Ensure the runtime directory is empty and has correct permissions
+# Clean up ALL runtime files and sockets
+echo "Cleaning up runtime files..."
 run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse
+run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-*
+run_as_user rm -rf "$USER_HOME/.local/state/pipewire/"*
+run_as_user rm -rf "$USER_HOME/.cache/pipewire/"*
+run_as_user rm -rf "$USER_HOME/.config/pipewire/"*
 
-# Reload systemd to clear any cached state
+# Clean up systemd state
+echo "Cleaning up systemd state..."
+run_systemctl "stop pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
+run_systemctl "disable pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
+run_systemctl "reset-failed"
 run_systemctl "daemon-reload"
 
-# Start services in order with proper delays
-echo "Starting PipeWire services..."
+# Recreate directories with proper permissions
+echo "Setting up clean PipeWire directories..."
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pulse
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pulse
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pulse
 
-# Start with sockets first
-echo "Starting PipeWire socket..."
+# Update PipeWire configuration with simpler module loading
+echo "Updating PipeWire configuration..."
+run_as_root mkdir -p /etc/pipewire/pipewire.conf.d
+run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.conf << EOF
+{
+    "context.properties": {
+        "default.clock.rate": 48000,
+        "default.clock.quantum": 1024,
+        "default.clock.min-quantum": 32,
+        "default.clock.max-quantum": 8192,
+        "support.dbus": true,
+        "log.level": 2,
+        "mem.allow-mlock": true,
+        "core.daemon": true
+    },
+    "context.spa-libs": {
+        "audio.convert.*": "audioconvert/libspa-audioconvert",
+        "support.*": "support/libspa-support",
+        "api.bluez5.*": "bluez5/libspa-bluez5"
+    },
+    "context.modules": [
+        {
+            "name": "libpipewire-module-rt",
+            "args": {
+                "nice.level": -11,
+                "rt.prio": 88,
+                "rt.time.soft": 200000,
+                "rt.time.hard": 200000
+            },
+            "flags": [ "ifexists", "nofail" ]
+        },
+        { "name": "libpipewire-module-protocol-native" },
+        { "name": "libpipewire-module-client-node" },
+        { "name": "libpipewire-module-adapter" },
+        { "name": "libpipewire-module-metadata" }
+    ],
+    "stream.properties": {
+        "resample.quality": 7,
+        "channelmix.normalize": true,
+        "channelmix.mix-lfe": false
+    }
+}
+EOF
+
+# Start services in strict order with longer delays
+echo "Starting PipeWire services..."
 run_systemctl "enable pipewire.socket"
 run_systemctl "start pipewire.socket"
-sleep 2
+sleep 5  # Longer delay to ensure socket is ready
 
 echo "Starting PipeWire service..."
 run_systemctl "enable pipewire.service"
 run_systemctl "start pipewire.service"
-sleep 3
+sleep 8  # Even longer delay for service initialization
 
-# Check if PipeWire started successfully
+# Verify PipeWire is running before continuing
 if ! run_systemctl "is-active pipewire.service"; then
     echo "Error: PipeWire failed to start. Checking logs..."
     run_systemctl "status pipewire.service"
@@ -247,15 +287,15 @@ fi
 echo "Starting WirePlumber..."
 run_systemctl "enable wireplumber.service"
 run_systemctl "start wireplumber.service"
-sleep 3
+sleep 5
 
 echo "Starting PipeWire-PulseAudio services..."
 run_systemctl "enable pipewire-pulse.socket"
 run_systemctl "start pipewire-pulse.socket"
-sleep 2
+sleep 3
 run_systemctl "enable pipewire-pulse.service"
 run_systemctl "start pipewire-pulse.service"
-sleep 3
+sleep 5
 
 # Verify all services
 echo "Verifying services..."
