@@ -85,6 +85,42 @@ run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")
 run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")
 run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")
 
+# Create PipeWire specific directories
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pulse
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pulse
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pulse
+
+# Set up cache directories
+run_as_root mkdir -p /var/cache/pipewire
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /var/cache/pipewire
+run_as_root chmod 700 /var/cache/pipewire
+
+# Set up user config and cache directories
+run_as_user mkdir -p "$USER_HOME/.cache/pipewire"
+run_as_user mkdir -p "$USER_HOME/.local/state/pipewire"
+run_as_user mkdir -p "$USER_HOME/.local/share/pipewire"
+run_as_user mkdir -p "$USER_HOME/.config/pipewire"
+run_as_user mkdir -p "$USER_HOME/.config/systemd/user"
+
+# Ensure all PipeWire directories have correct permissions
+run_as_user chmod 700 "$USER_HOME/.cache/pipewire"
+run_as_user chmod 700 "$USER_HOME/.local/state/pipewire"
+run_as_user chmod 700 "$USER_HOME/.local/share/pipewire"
+
+# Create necessary subdirectories
+run_as_user mkdir -p "$USER_HOME/.local/state/pipewire/media-session.d"
+run_as_user mkdir -p "$USER_HOME/.config/pipewire/media-session.d"
+run_as_user mkdir -p "$USER_HOME/.config/pipewire/client.conf.d"
+run_as_user mkdir -p "$USER_HOME/.config/pipewire/client-rt.conf.d"
+
+# Set up systemd runtime directory
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/systemd
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/systemd
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/systemd
+
 # Set up D-Bus session
 echo "Setting up D-Bus session..."
 
@@ -130,22 +166,6 @@ rm -f /tmp/dbus.conf.tmp
 
 # Export for current session
 export XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
-
-# Set up user config directories
-run_as_user mkdir -p "$USER_HOME/.local/state/pipewire"
-run_as_user mkdir -p "$USER_HOME/.local/share/pipewire"
-run_as_user mkdir -p "$USER_HOME/.config/pipewire"
-run_as_user mkdir -p "$USER_HOME/.config/systemd/user"
-
-# Export required environment variables
-export XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
-
-# Start D-Bus session if not running
-echo "Starting D-Bus session..."
-if ! run_as_user dbus-daemon --session --address="unix:path=/run/user/$(id -u "$ACTUAL_USER")/bus" --nofork --nopidfile --syslog-only & then
-    echo "Warning: Failed to start D-Bus session"
-fi
-sleep 2
 
 # Configure systemd user service environment
 echo "Configuring systemd user environment..."
@@ -447,15 +467,6 @@ return {
   ["alsa_monitor"] = alsa_monitor
 }
 EOF
-
-# Ensure cache directories exist with correct permissions
-echo "Setting up PipeWire cache directories..."
-run_as_root mkdir -p /var/cache/pipewire
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /var/cache/pipewire
-run_as_root chmod 700 /var/cache/pipewire
-
-run_as_user mkdir -p "$USER_HOME/.cache/pipewire"
-run_as_user mkdir -p "$USER_HOME/.local/state/pipewire"
 
 # Verify service status
 echo "Verifying service status..."
