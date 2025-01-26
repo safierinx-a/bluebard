@@ -52,6 +52,22 @@ run_systemctl() {
     run_as_user bash -c "export XDG_RUNTIME_DIR=/run/user/\$(id -u) DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS' && systemctl --user $1"
 }
 
+# Function to manage PipeWire services
+manage_pipewire_services() {
+    local action=$1
+    local services=(
+        "pipewire.socket"
+        "pipewire-pulse.socket"
+        "pipewire.service"
+        "pipewire-pulse.service"
+        "wireplumber.service"
+    )
+    
+    for service in "${services[@]}"; do
+        run_systemctl "$action $service"
+    done
+}
+
 # Create necessary directories with proper permissions
 echo "Setting up system directories..."
 run_as_root mkdir -p /etc/bluebard
@@ -210,13 +226,19 @@ echo "Cleaning up existing sockets..."
 run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
 run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pulse/* || true
 
-# Kill any existing PipeWire processes first
+# Stop all services and clean up
+echo "Stopping all services and cleaning up..."
+manage_pipewire_services "stop"
+manage_pipewire_services "disable"
+run_systemctl "reset-failed"
+
+# Kill any remaining processes
 echo "Ensuring no PipeWire processes are running..."
 run_as_user pkill -9 pipewire 2>/dev/null || true
 run_as_user pkill -9 wireplumber 2>/dev/null || true
 sleep 2
 
-# Clean up ALL runtime files and sockets
+# Clean up ALL runtime files
 echo "Cleaning up runtime files..."
 run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire
 run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse
@@ -224,13 +246,6 @@ run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-*
 run_as_user rm -rf "$USER_HOME/.local/state/pipewire/"*
 run_as_user rm -rf "$USER_HOME/.cache/pipewire/"*
 run_as_user rm -rf "$USER_HOME/.config/pipewire/"*
-
-# Clean up systemd state
-echo "Cleaning up systemd state..."
-run_systemctl "stop pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
-run_systemctl "disable pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
-run_systemctl "reset-failed"
-run_systemctl "daemon-reload"
 
 # Recreate directories with proper permissions
 echo "Setting up clean PipeWire directories..."
@@ -241,73 +256,38 @@ run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/
 run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
 run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pulse
 
-# Update PipeWire configuration with simpler module loading
-echo "Updating PipeWire configuration..."
-run_as_root mkdir -p /etc/pipewire/pipewire.conf.d
-run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.conf << EOF
-{
-    "context.properties": {
-        "default.clock.rate": 48000,
-        "default.clock.quantum": 1024,
-        "default.clock.min-quantum": 32,
-        "default.clock.max-quantum": 8192,
-        "support.dbus": true,
-        "log.level": 2,
-        "mem.allow-mlock": true,
-        "core.daemon": true
-    },
-    "context.spa-libs": {
-        "audio.convert.*": "audioconvert/libspa-audioconvert",
-        "support.*": "support/libspa-support",
-        "api.bluez5.*": "bluez5/libspa-bluez5"
-    },
-    "context.modules": [
-        {
-            "name": "libpipewire-module-rt",
-            "args": {
-                "nice.level": -11,
-                "rt.prio": 88,
-                "rt.time.soft": 200000,
-                "rt.time.hard": 200000
-            },
-            "flags": [ "ifexists", "nofail" ]
-        },
-        { "name": "libpipewire-module-protocol-native" },
-        { "name": "libpipewire-module-client-node" },
-        { "name": "libpipewire-module-adapter" },
-        { "name": "libpipewire-module-metadata" }
-    ],
-    "stream.properties": {
-        "resample.quality": 7,
-        "channelmix.normalize": true,
-        "channelmix.mix-lfe": false
-    }
-}
-EOF
+# Reload systemd configuration
+run_systemctl "daemon-reload"
 
-# Start services in strict order with longer delays
+# Start services in strict order with proper delays
 echo "Starting PipeWire services..."
+
+# Start socket first and wait
+echo "Starting PipeWire socket..."
 run_systemctl "enable pipewire.socket"
 run_systemctl "start pipewire.socket"
-sleep 5  # Longer delay to ensure socket is ready
+sleep 5
 
+# Start PipeWire service
 echo "Starting PipeWire service..."
 run_systemctl "enable pipewire.service"
 run_systemctl "start pipewire.service"
-sleep 8  # Even longer delay for service initialization
+sleep 5
 
-# Verify PipeWire is running before continuing
+# Check if PipeWire started successfully
 if ! run_systemctl "is-active pipewire.service"; then
     echo "Error: PipeWire failed to start. Checking logs..."
     run_systemctl "status pipewire.service"
     exit 1
 fi
 
+# Start WirePlumber
 echo "Starting WirePlumber..."
 run_systemctl "enable wireplumber.service"
 run_systemctl "start wireplumber.service"
 sleep 5
 
+# Start PulseAudio compatibility
 echo "Starting PipeWire-PulseAudio services..."
 run_systemctl "enable pipewire-pulse.socket"
 run_systemctl "start pipewire-pulse.socket"
@@ -316,12 +296,14 @@ run_systemctl "enable pipewire-pulse.service"
 run_systemctl "start pipewire-pulse.service"
 sleep 5
 
-# Verify all services
+# Final verification
 echo "Verifying services..."
 for service in pipewire.service wireplumber.service pipewire-pulse.service; do
     if ! run_systemctl "is-active $service"; then
         echo "Warning: $service failed to start"
         run_systemctl "status $service"
+    else
+        echo "$service is running"
     fi
 done
 
@@ -452,79 +434,21 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
         "support.dbus": true,
         "log.level": 2,
         "mem.allow-mlock": true,
-        "core.daemon": true,
-        "core.name": "pipewire-0"
+        "core.daemon": false
     },
     "context.spa-libs": {
         "audio.convert.*": "audioconvert/libspa-audioconvert",
-        "support.*": "support/libspa-support",
-        "api.bluez5.*": "bluez5/libspa-bluez5"
+        "support.*": "support/libspa-support"
     },
     "context.modules": [
-        {
-            "name": "libpipewire-module-rt",
-            "args": {
-                "nice.level": -11,
-                "rt.prio": 88,
-                "rt.time.soft": 200000,
-                "rt.time.hard": 200000
-            },
-            "flags": [ "ifexists", "nofail" ]
-        },
-        {
-            "name": "libpipewire-module-protocol-native",
-            "flags": [ "nofail" ]
-        },
-        {
-            "name": "libpipewire-module-client-node",
-            "flags": [ "nofail" ]
-        },
-        {
-            "name": "libpipewire-module-adapter",
-            "flags": [ "nofail" ]
-        },
-        {
-            "name": "libpipewire-module-metadata",
-            "flags": [ "nofail" ]
-        },
-        {
-            "name": "libpipewire-module-portal",
-            "flags": [ "ifexists", "nofail" ]
-        },
-        {
-            "name": "libpipewire-module-access",
-            "args": {},
-            "flags": [ "ifexists", "nofail" ]
-        }
+        { "name": "libpipewire-module-protocol-native" },
+        { "name": "libpipewire-module-client-node" },
+        { "name": "libpipewire-module-adapter" },
+        { "name": "libpipewire-module-metadata" }
     ],
     "stream.properties": {
-        "resample.quality": 7,
-        "resample.disable": false,
-        "channelmix.normalize": true,
-        "channelmix.mix-lfe": false,
-        "dither.noise": -90
-    },
-    "pulse.properties": {
-        "server.address": [ "unix:/run/user/$(id -u "$ACTUAL_USER")/pulse/native" ]
-    },
-    "pulse.rules": [
-        {
-            "matches": [ { "device.name": "~bluez_*" } ],
-            "actions": {
-                "update-props": {
-                    "bluez5.autoswitch-profile": true,
-                    "bluez5.profile": "a2dp-sink",
-                    "bluez5.roles": [ "sink" ],
-                    "bluez5.reconnect-profiles": [ "a2dp_sink", "headset_head_unit" ],
-                    "bluez5.codecs": [ "aac", "sbc_xq", "sbc" ],
-                    "api.alsa.period-size": 1024,
-                    "api.alsa.headroom": 8192,
-                    "api.alsa.disable-mmap": true,
-                    "session.suspend-timeout-seconds": 0
-                }
-            }
-        }
-    ]
+        "resample.quality": 7
+    }
 }
 EOF
 
