@@ -33,6 +33,25 @@ run_as_root() {
     "$@"
 }
 
+# Function to run systemctl with proper environment
+run_systemctl() {
+    # If DBUS_SESSION_BUS_ADDRESS is not set, try to find it
+    if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+        # Try the default path first
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$ACTUAL_USER")/bus"
+        # If that doesn't work, try to start a new session
+        if ! run_as_user dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+            DBUS_LAUNCH_OUTPUT=$(run_as_user dbus-launch --sh-syntax)
+            if [ $? -eq 0 ]; then
+                eval "$DBUS_LAUNCH_OUTPUT"
+            fi
+        fi
+    fi
+    
+    # Run the systemctl command with the environment set
+    run_as_user bash -c "export XDG_RUNTIME_DIR=/run/user/\$(id -u) DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS' && systemctl --user $1"
+}
+
 # Create necessary directories with proper permissions
 echo "Setting up system directories..."
 run_as_root mkdir -p /etc/bluebard
