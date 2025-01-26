@@ -259,22 +259,36 @@ run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pulse
 # Reload systemd configuration
 run_systemctl "daemon-reload"
 
-# Start services in strict order with proper delays
+# Start services in strict order with proper dependencies
 echo "Starting PipeWire services..."
 
-# Start socket first and wait
-echo "Starting PipeWire socket..."
-run_systemctl "enable pipewire.socket"
-run_systemctl "start pipewire.socket"
-sleep 5
+# First, make sure all services are stopped and disabled
+manage_pipewire_services "stop"
+manage_pipewire_services "disable"
+run_systemctl "reset-failed"
 
-# Start PipeWire service
+# Clear any remaining sockets
+echo "Cleaning up existing sockets..."
+run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pipewire-* || true
+run_as_root rm -f /run/user/$(id -u "$ACTUAL_USER")/pulse/* || true
+
+# Reload systemd to recognize all changes
+run_systemctl "daemon-reload"
+
+# Start sockets first
+echo "Starting PipeWire sockets..."
+run_systemctl "enable pipewire.socket"
+run_systemctl "enable pipewire-pulse.socket"
+run_systemctl "start pipewire.socket"
+run_systemctl "start pipewire-pulse.socket"
+sleep 3
+
+# Start PipeWire service and verify
 echo "Starting PipeWire service..."
 run_systemctl "enable pipewire.service"
 run_systemctl "start pipewire.service"
-sleep 5
+sleep 3
 
-# Check if PipeWire started successfully
 if ! run_systemctl "is-active pipewire.service"; then
     echo "Error: PipeWire failed to start. Checking logs..."
     run_systemctl "status pipewire.service"
@@ -285,20 +299,18 @@ fi
 echo "Starting WirePlumber..."
 run_systemctl "enable wireplumber.service"
 run_systemctl "start wireplumber.service"
-sleep 5
-
-# Start PulseAudio compatibility
-echo "Starting PipeWire-PulseAudio services..."
-run_systemctl "enable pipewire-pulse.socket"
-run_systemctl "start pipewire-pulse.socket"
 sleep 3
+
+# Finally start PipeWire-Pulse service
+echo "Starting PipeWire-PulseAudio service..."
 run_systemctl "enable pipewire-pulse.service"
 run_systemctl "start pipewire-pulse.service"
-sleep 5
+sleep 3
 
-# Final verification
+# Final verification with detailed status
 echo "Verifying services..."
-for service in pipewire.service wireplumber.service pipewire-pulse.service; do
+for service in pipewire.socket pipewire-pulse.socket pipewire.service wireplumber.service pipewire-pulse.service; do
+    echo "Checking $service..."
     if ! run_systemctl "is-active $service"; then
         echo "Warning: $service failed to start"
         run_systemctl "status $service"
@@ -307,152 +319,36 @@ for service in pipewire.service wireplumber.service pipewire-pulse.service; do
     fi
 done
 
-# Remove system-level PulseAudio service
-echo "Removing system-level PulseAudio service..."
-run_as_root rm -f /etc/systemd/system/pulseaudio.service
-run_as_root systemctl daemon-reload
-
-# Remove only conflicting packages
-echo "Removing conflicting packages..."
-run_as_root apt-get remove --purge -y \
-    bluealsa \
-    bluealsa-* \
-    libasound2-plugin-bluez || true
-
-run_as_root apt-get autoremove -y
-
-# Clean up old configurations and state
-echo "Cleaning up old configurations..."
-run_as_root rm -rf \
-    /etc/bluetooth/audio.conf \
-    /var/lib/bluealsa \
-    /etc/systemd/system/bluealsa.service \
-    /etc/systemd/system/bluealsa-aplay.service
-
-# Clean up user-specific audio configurations
-echo "Cleaning up user configurations..."
-run_as_user rm -rf \
-    "$USER_HOME/.config/systemd/user/pulseaudio"*
-
-# Reload systemd to recognize removed packages
-run_as_root systemctl daemon-reload
-
-# Stop all existing audio services
-echo "Stopping audio services..."
-# Stop PipeWire services
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire-pulse.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop pipewire.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user stop wireplumber.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire-pulse.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable pipewire.service 2>/dev/null || true
-run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") systemctl --user disable wireplumber.service 2>/dev/null || true
-
-# Update package lists
-echo "Updating package lists..."
-run_as_root apt-get update
-
-# Install required packages
-echo "Installing required packages..."
-run_as_root apt-get install -y \
-    bluez \
-    bluetooth \
-    bluez-tools \
-    alsa-utils \
-    pipewire \
-    pipewire-audio \
-    wireplumber \
-    pipewire-pulse \
-    pipewire-alsa \
-    pipewire-jack \
-    pipewire-v4l2 \
-    pipewire-bin \
-    libspa-0.2-bluetooth \
-    libspa-0.2-jack \
-    python3-dbus \
-    python3-gi \
-    python3-setuptools \
-    python3-wheel
-
-# Install Python package system-wide
-echo "Installing Bluebard package..."
-run_as_root pip3 install --break-system-packages -e .
-
-# Configure Bluetooth
-echo "Configuring Bluetooth..."
-
-# Fix Bluetooth configuration directory permissions
-run_as_root mkdir -p /etc/bluetooth
-run_as_root chmod 555 /etc/bluetooth
-run_as_root chown root:root /etc/bluetooth
-
-# Update Bluetooth service to use correct daemon path
-echo "Configuring Bluetooth service..."
-BLUETOOTHD_PATH=$(command -v bluetoothd)
-if [ -z "$BLUETOOTHD_PATH" ]; then
-    echo "Error: bluetoothd not found. Please ensure bluez is installed correctly."
-    exit 1
+# Verify PipeWire is working
+echo "Testing PipeWire functionality..."
+if ! run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") pw-cli info > /dev/null 2>&1; then
+    echo "Warning: PipeWire is not responding to commands"
+    echo "Try running: systemctl --user restart pipewire pipewire-pulse"
+else
+    echo "PipeWire is responding to commands"
 fi
 
-run_as_root mkdir -p /etc/systemd/system/bluetooth.service.d
-run_as_root install -m 644 /dev/stdin /etc/systemd/system/bluetooth.service.d/override.conf << EOF
-[Service]
-ExecStart=
-ExecStart=$BLUETOOTHD_PATH --experimental
-Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u "$ACTUAL_USER")/pulse
-EOF
+# Verify PulseAudio compatibility
+if ! run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") pactl info > /dev/null 2>&1; then
+    echo "Warning: PipeWire-PulseAudio is not responding"
+    echo "Try running: systemctl --user restart pipewire-pulse"
+else
+    echo "PipeWire-PulseAudio is working"
+fi
 
-run_as_root install -m 644 /dev/stdin /etc/bluetooth/main.conf << EOF
-[General]
-Class = 0x200414  # Audio device
-Name = Bluebard Audio
-DiscoverableTimeout = 0
-Discoverable = true
-Enable=Source,Sink,Media,Socket,Gateway
-FastConnectable=true
-Experimental = true
+# Verify Bluetooth
+if ! run_as_user bluetoothctl show > /dev/null 2>&1; then
+    echo "Warning: Bluetooth service is not running properly"
+    echo "Try running: sudo systemctl restart bluetooth"
+else
+    echo "Bluetooth service is running"
+fi
 
-[Policy]
-AutoEnable=true
-ReconnectAttempts=7
-ReconnectIntervals=1,2,4,8,16,32,64
+echo "Installation complete!"
+echo "NOTE: You may need to log out and log back in for group changes to take effect."
+echo "To test the setup, run: python3 -m bluebard.tools.test_audio"
 
-[GATT]
-KeySize=16
-ExchangeMTU=517
-EOF
-
-# Configure PipeWire
-echo "Configuring PipeWire..."
-run_as_root mkdir -p /etc/pipewire/pipewire.conf.d
-run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.conf << EOF
-{
-    "context.properties": {
-        "default.clock.rate": 48000,
-        "default.clock.quantum": 1024,
-        "default.clock.min-quantum": 32,
-        "default.clock.max-quantum": 8192,
-        "support.dbus": true,
-        "log.level": 2,
-        "mem.allow-mlock": true,
-        "core.daemon": false
-    },
-    "context.spa-libs": {
-        "audio.convert.*": "audioconvert/libspa-audioconvert",
-        "support.*": "support/libspa-support"
-    },
-    "context.modules": [
-        { "name": "libpipewire-module-protocol-native" },
-        { "name": "libpipewire-module-client-node" },
-        { "name": "libpipewire-module-adapter" },
-        { "name": "libpipewire-module-metadata" }
-    ],
-    "stream.properties": {
-        "resample.quality": 7
-    }
-}
-EOF
-
-# Set up WirePlumber configuration
+# Configure WirePlumber
 echo "Setting up WirePlumber configuration..."
 run_as_root mkdir -p /etc/wireplumber/main.lua.d
 run_as_root install -m 644 /dev/stdin /etc/wireplumber/main.lua.d/51-bluebard.lua << EOF
@@ -530,20 +426,56 @@ return {
 }
 EOF
 
-# Verify service status
-echo "Verifying service status..."
+# Reload systemd to recognize all changes
+run_systemctl "daemon-reload"
+
+# Start services in strict order
+echo "Starting PipeWire services..."
+
+# Start socket first and wait
+echo "Starting PipeWire socket..."
+run_systemctl "enable pipewire.socket"
+run_systemctl "start pipewire.socket"
+sleep 5
+
+# Start PipeWire service
+echo "Starting PipeWire service..."
+run_systemctl "enable pipewire.service"
+run_systemctl "start pipewire.service"
+sleep 5
+
+# Check if PipeWire started successfully
+if ! run_systemctl "is-active pipewire.service"; then
+    echo "Error: PipeWire failed to start. Checking logs..."
+    run_systemctl "status pipewire.service"
+    exit 1
+fi
+
+# Start WirePlumber
+echo "Starting WirePlumber..."
+run_systemctl "enable wireplumber.service"
+run_systemctl "start wireplumber.service"
+sleep 5
+
+# Start PulseAudio compatibility
+echo "Starting PipeWire-PulseAudio services..."
+run_systemctl "enable pipewire-pulse.socket"
+run_systemctl "start pipewire-pulse.socket"
+sleep 3
+run_systemctl "enable pipewire-pulse.service"
+run_systemctl "start pipewire-pulse.service"
+sleep 5
+
+# Final verification
+echo "Verifying services..."
 for service in pipewire.service wireplumber.service pipewire-pulse.service; do
-    if ! run_as_user systemctl --user is-active $service >/dev/null 2>&1; then
-        echo "Warning: $service is not running"
-        run_as_user systemctl --user status $service
+    if ! run_systemctl "is-active $service"; then
+        echo "Warning: $service failed to start"
+        run_systemctl "status $service"
     else
         echo "$service is running"
     fi
 done
-
-# Add user to required groups
-echo "Adding user to required groups..."
-run_as_root usermod -a -G bluetooth,audio "$ACTUAL_USER"
 
 # Verify installation
 echo "Verifying installation..."
@@ -567,53 +499,114 @@ echo "Installation complete!"
 echo "NOTE: You may need to log out and log back in for group changes to take effect."
 echo "To test the setup, run: python3 -m bluebard.tools.test_audio"
 
-# Add a delay before starting services
-sleep 2
+# Configure PipeWire
+echo "Configuring PipeWire..."
+run_as_root mkdir -p /etc/pipewire/pipewire.conf.d
+run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.conf << EOF
+{
+    "context.properties": {
+        "default.clock.rate": 48000,
+        "default.clock.quantum": 1024,
+        "default.clock.min-quantum": 32,
+        "default.clock.max-quantum": 8192,
+        "support.dbus": true,
+        "log.level": 2,
+        "mem.allow-mlock": true,
+        "core.daemon": false,
+        "module.allow-duplicate": false,
+        "vm.overcommit": 1
+    },
+    "context.spa-libs": {
+        "audio.convert.*": "audioconvert/libspa-audioconvert",
+        "support.*": "support/libspa-support"
+    },
+    "context.modules": [
+        { 
+            "name": "libpipewire-module-protocol-native",
+            "args": {
+                "socket.listen.path": "${PIPEWIRE_RUNTIME_DIR}/pipewire-0"
+            }
+        },
+        { "name": "libpipewire-module-client-node" },
+        { "name": "libpipewire-module-adapter" },
+        { "name": "libpipewire-module-metadata" },
+        {
+            "name": "libpipewire-module-protocol-pulse",
+            "args": {
+                "server.address": [ "unix:native", "tcp:4713" ],
+                "pulse.min.req": "32/48000",
+                "pulse.default.req": "960/48000",
+                "pulse.max.req": "4096/48000",
+                "pulse.min.frag": "32/48000",
+                "pulse.default.frag": "96000/48000",
+                "pulse.max.frag": "4096/48000"
+            }
+        }
+    ],
+    "stream.properties": {
+        "resample.quality": 7,
+        "resample.disable": false,
+        "channelmix.normalize": true,
+        "channelmix.mix-lfe": false,
+        "dither.noise": -90
+    }
+}
+EOF
 
-# Stop and reset all PipeWire-related services
-echo "Resetting PipeWire services..."
-run_systemctl "stop pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service"
-run_systemctl "reset-failed"
+# Configure PipeWire client settings
+run_as_root mkdir -p /etc/pipewire/client.conf.d
+run_as_root install -m 644 /dev/stdin /etc/pipewire/client.conf.d/99-bluebard.conf << EOF
+{
+    "context.properties": {
+        "log.level": 2
+    },
+    "context.modules": [
+        {
+            "name": "libpipewire-module-protocol-native",
+            "flags": [ "nofail" ]
+        }
+    ],
+    "stream.properties": {
+        "resample.quality": 7,
+        "node.latency": "256/48000",
+        "node.autoconnect": true
+    }
+}
+EOF
 
-# Clean up ALL runtime files
-echo "Cleaning up runtime files..."
-run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pulse
-run_as_root rm -rf /run/user/$(id -u "$ACTUAL_USER")/pipewire-*
-run_as_user rm -rf "$USER_HOME/.local/state/pipewire/"*
-run_as_user rm -rf "$USER_HOME/.cache/pipewire/"*
-
-# Recreate directories with proper permissions
-run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")/pulse
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")/pulse
-run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
-run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pulse
-
-# Reload systemd configuration
-run_systemctl "daemon-reload"
-
-# Start services in strict order with longer delays
-echo "Starting PipeWire services..."
-run_systemctl "enable --now pipewire.socket"
-sleep 3
-run_systemctl "enable --now pipewire.service"
-sleep 5
-
-# Verify PipeWire is running before continuing
-if ! run_systemctl "is-active pipewire.service"; then
-    echo "Error: PipeWire failed to start. Checking logs..."
-    run_systemctl "status pipewire.service"
-    exit 1
-fi
-
-echo "Starting WirePlumber..."
-run_systemctl "enable --now wireplumber.service"
-sleep 3
-
-echo "Starting PipeWire-PulseAudio services..."
-run_systemctl "enable --now pipewire-pulse.socket"
-sleep 2
-run_systemctl "enable --now pipewire-pulse.service"
-sleep 3 
+# Configure PipeWire-Pulse settings
+run_as_root mkdir -p /etc/pipewire/pipewire-pulse.conf.d
+run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire-pulse.conf.d/99-bluebard.conf << EOF
+{
+    "context.properties": {
+        "log.level": 2
+    },
+    "context.modules": [
+        {
+            "name": "libpipewire-module-protocol-pulse",
+            "args": {
+                "pulse.min.req": "32/48000",
+                "pulse.default.req": "960/48000",
+                "pulse.max.req": "4096/48000",
+                "pulse.min.frag": "32/48000",
+                "pulse.default.frag": "96000/48000",
+                "pulse.max.frag": "4096/48000",
+                "pulse.default.tlength": "96000/48000",
+                "pulse.min.quantum": "32/48000"
+            }
+        }
+    ],
+    "pulse.properties": {
+        "server.address": [ "unix:native", "tcp:4713" ],
+        "vm.overrides": {
+            "pulse.max-latency-msec": 200,
+            "pulse.min-latency-msec": 1
+        }
+    },
+    "stream.properties": {
+        "resample.quality": 7,
+        "channelmix.normalize": true,
+        "channelmix.mix-lfe": false
+    }
+}
+EOF 
