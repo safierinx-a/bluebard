@@ -34,6 +34,12 @@ run_as_user() {
     mkdir -p "$USER_HOME/.config/pipewire"
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$USER_HOME/.config"
 
+    # Start D-Bus if not running
+    if ! pgrep -u "$ACTUAL_USER" dbus-daemon > /dev/null; then
+        sudo -u "$ACTUAL_USER" dbus-daemon --session --address="unix:path=$USER_RUNTIME_DIR/bus" --fork
+        sleep 1
+    fi
+
     # Run the command with proper environment
     sudo -u "$ACTUAL_USER" \
         HOME="$USER_HOME" \
@@ -48,15 +54,12 @@ echo "Installing required packages..."
 apt-get update
 
 # Install D-Bus and utilities first
-apt-get install -y dbus pulseaudio-utils
+apt-get install -y dbus dbus-user-session pulseaudio-utils
 
 # Start D-Bus system daemon if not running
 if ! systemctl is-active --quiet dbus; then
     systemctl start dbus
 fi
-
-# First, try to install pipewire-media-session as it might be needed
-apt-get install -y pipewire-media-session || true
 
 # Install core packages
 apt-get install -y \
@@ -82,19 +85,13 @@ apt-get autoremove -y
 echo "Cleaning up existing processes..."
 pkill -u "$ACTUAL_USER" -9 pipewire || true
 pkill -u "$ACTUAL_USER" -9 wireplumber || true
-sleep 1
+pkill -u "$ACTUAL_USER" -9 dbus-daemon || true
+sleep 2
 
-# Ensure D-Bus session is running for the user
+# Start a new D-Bus session
 echo "Setting up D-Bus session..."
-if ! run_as_user dbus-launch --sh-syntax > /dev/null; then
-    echo "Warning: Could not start D-Bus session"
-fi
-
-# Stop and disable PulseAudio for the user
-echo "Disabling PulseAudio..."
-run_as_user systemctl --user stop pulseaudio.service pulseaudio.socket || true
-run_as_user systemctl --user disable pulseaudio.service pulseaudio.socket || true
-run_as_user systemctl --user mask pulseaudio.service pulseaudio.socket || true
+run_as_user dbus-daemon --session --address="unix:path=/run/user/$(id -u "$ACTUAL_USER")/bus" --nofork --print-address &
+sleep 2
 
 # Configure Bluetooth for better audio
 echo "Configuring Bluetooth..."
@@ -113,12 +110,12 @@ EOF
 
 # Configure PipeWire
 echo "Configuring PipeWire..."
+mkdir -p "/home/$ACTUAL_USER/.config/pipewire"
 cat > "/home/$ACTUAL_USER/.config/pipewire/pipewire.conf" << EOF
 context.properties = {
     link.max-buffers = 16
     core.daemon = true
     core.name = pipewire-0
-    vm.overrides = { default.clock.min-quantum = 1024 }
 }
 
 context.spa-libs = {
@@ -133,7 +130,6 @@ context.modules = [
     { name = libpipewire-module-client-node }
     { name = libpipewire-module-adapter }
     { name = libpipewire-module-metadata }
-    { name = libpipewire-module-session-manager }
 ]
 EOF
 
@@ -148,12 +144,12 @@ rm -rf "/home/$ACTUAL_USER/.config/systemd/user/pipewire*" || true
 rm -rf "/home/$ACTUAL_USER/.config/systemd/user/wireplumber*" || true
 rm -f "/run/user/$(id -u "$ACTUAL_USER")/pipewire-*" || true
 
+# Create systemd user service directory
+mkdir -p "/home/$ACTUAL_USER/.config/systemd/user"
+chown -R "$ACTUAL_USER:$ACTUAL_USER" "/home/$ACTUAL_USER/.config/systemd"
+
 # Reload systemd user daemon
 run_as_user systemctl --user daemon-reload
-
-# Start D-Bus user session if not running
-run_as_user systemctl --user start dbus.socket || true
-run_as_user systemctl --user start dbus.service || true
 
 # Enable and start PipeWire services for the user
 echo "Starting PipeWire services..."
@@ -173,7 +169,7 @@ echo "Verifying installation..."
 sleep 2
 
 # Check PipeWire status with more detailed error reporting
-if ! run_as_user pw-cli info 2>/dev/null | grep -q "PipeWire"; then
+if ! run_as_user systemctl --user status pipewire.service | grep -q "Active: active"; then
     echo "Error: PipeWire is not running correctly"
     echo "Checking service status..."
     run_as_user systemctl --user status pipewire.service
