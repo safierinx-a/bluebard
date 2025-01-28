@@ -313,146 +313,100 @@ EOF
 run_systemctl "daemon-reload"
 run_systemctl "reset-failed"
 
-# Start services with proper delays
-echo "Starting PipeWire services..."
-run_systemctl "start pipewire.socket"
-sleep 2
-run_systemctl "start pipewire.service"
-sleep 3
+# Create systemd user service overrides
+echo "Creating systemd user service overrides..."
+run_as_user mkdir -p "$USER_HOME/.config/systemd/user/pipewire.service.d"
+run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/systemd/user/pipewire.service.d/override.conf" << EOF
+[Unit]
+Description=PipeWire Multimedia Service
+After=dbus.socket
+Requires=dbus.socket pipewire.socket
+ConditionUser=!root
 
-# Check PipeWire status before continuing
-if ! run_systemctl "is-active pipewire.service"; then
-    echo "Error: PipeWire failed to start. Checking logs..."
-    run_systemctl "status pipewire.service"
-    exit 1
-fi
+[Service]
+Type=simple
+ExecStart=/usr/bin/pipewire
+Restart=on-failure
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
-# Verify PipeWire is working
-echo "Testing PipeWire functionality..."
-if ! run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") pw-cli info > /dev/null 2>&1; then
-    echo "Warning: PipeWire is not responding to commands"
-    echo "Try running: systemctl --user restart pipewire pipewire-pulse"
-else
-    echo "PipeWire is responding to commands"
-fi
-
-# Verify PulseAudio compatibility
-if ! run_as_user XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER") pactl info > /dev/null 2>&1; then
-    echo "Warning: PipeWire-PulseAudio is not responding"
-    echo "Try running: systemctl --user restart pipewire-pulse"
-else
-    echo "PipeWire-PulseAudio is working"
-fi
-
-# Verify Bluetooth
-if ! run_as_user bluetoothctl show > /dev/null 2>&1; then
-    echo "Warning: Bluetooth service is not running properly"
-    echo "Try running: sudo systemctl restart bluetooth"
-else
-    echo "Bluetooth service is running"
-fi
-
-echo "Installation complete!"
-echo "NOTE: You may need to log out and log back in for group changes to take effect."
-echo "To test the setup, run: python3 -m bluebard.tools.test_audio"
-
-# Configure WirePlumber
-echo "Setting up WirePlumber configuration..."
-run_as_root mkdir -p /etc/wireplumber/main.lua.d
-run_as_root install -m 644 /dev/stdin /etc/wireplumber/main.lua.d/51-bluebard.lua << EOF
-local bluez_monitor = {}
-
-bluez_monitor.properties = {
-  ["bluez5.enable-sbc-xq"] = true,
-  ["bluez5.enable-msbc"] = true,
-  ["bluez5.enable-hw-volume"] = true,
-  ["bluez5.headset-roles"] = "[ sink, source ]",
-  ["bluez5.hfphsp-backend"] = "native",
-  ["bluez5.a2dp.ldac.quality"] = "auto",
-  ["bluez5.a2dp.aac.bitratemode"] = 0,
-  ["bluez5.a2dp.aac.quality"] = 5
-}
-
-bluez_monitor.rules = {
-    {
-        matches = {
-            {
-                { "device.name", "matches", "bluez_card.*" },
-            },
-        },
-        apply_properties = {
-            ["bluez5.reconnect-profiles"] = { "a2dp_sink", "hfp_hf" },
-            ["bluez5.headset-roles"] = { "hfp_hf", "hsp_hs" },
-            ["bluez5.auto-connect"] = true,
-            ["bluez5.hw-volume"] = true
-        }
-    }
-}
-
-local stream = {}
-
-stream.properties = {
-  ["resample.quality"] = 7,
-  ["resample.disable"] = false,
-  ["channelmix.normalize"] = true,
-  ["channelmix.mix-lfe"] = false,
-  ["dither.noise"] = -90,
-  ["clock.quantum-limit"] = 8192
-}
-
-local alsa_monitor = {}
-
-alsa_monitor.properties = {
-  ["alsa.jack-device"] = false,
-  ["alsa.reserve"] = true,
-  ["alsa.support-audio-fallback"] = true,
-  ["alsa.midi-driver"] = "none"
-}
-
-alsa_monitor.rules = {
-    {
-        matches = {
-            {
-                { "node.name", "matches", "alsa_output.*" },
-            },
-        },
-        apply_properties = {
-            ["audio.format"] = "S32LE",
-            ["audio.rate"] = 48000,
-            ["audio.channels"] = 2,
-            ["audio.position"] = "FL,FR",
-            ["api.alsa.period-size"] = 1024,
-            ["api.alsa.headroom"] = 8192
-        }
-    }
-}
-
-return {
-  ["bluez_monitor"] = bluez_monitor,
-  ["stream"] = stream,
-  ["alsa_monitor"] = alsa_monitor
-}
+[Install]
+Also=pipewire.socket
+WantedBy=default.target
 EOF
 
-# Reload systemd to recognize all changes
+run_as_user mkdir -p "$USER_HOME/.config/systemd/user/wireplumber.service.d"
+run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/systemd/user/wireplumber.service.d/override.conf" << EOF
+[Unit]
+Description=WirePlumber Session Manager
+After=dbus.socket pipewire.service
+Requires=dbus.socket pipewire.service
+ConditionUser=!root
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wireplumber
+Restart=on-failure
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
+
+[Install]
+WantedBy=pipewire.service
+EOF
+
+run_as_user mkdir -p "$USER_HOME/.config/systemd/user/pipewire-pulse.service.d"
+run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/systemd/user/pipewire-pulse.service.d/override.conf" << EOF
+[Unit]
+Description=PipeWire PulseAudio
+After=pipewire.service wireplumber.service
+Requires=pipewire.service pipewire-pulse.socket
+ConditionUser=!root
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pipewire-pulse
+Restart=on-failure
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
+Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u "$ACTUAL_USER")/pulse
+
+[Install]
+Also=pipewire-pulse.socket
+WantedBy=default.target
+EOF
+
+# Reload systemd to recognize changes
 run_systemctl "daemon-reload"
 
-# Start services in strict order
+# Start services in correct order with proper dependencies
 echo "Starting PipeWire services..."
 
-# Start socket first and wait
+# First ensure D-Bus is running
+if ! run_systemctl "is-active dbus.socket"; then
+    echo "Starting D-Bus socket..."
+    run_systemctl "start dbus.socket"
+    sleep 2
+fi
+
+# Start PipeWire socket first
 echo "Starting PipeWire socket..."
 run_systemctl "enable pipewire.socket"
 run_systemctl "start pipewire.socket"
-sleep 5
+sleep 2
 
 # Start PipeWire service
 echo "Starting PipeWire service..."
 run_systemctl "enable pipewire.service"
 run_systemctl "start pipewire.service"
-sleep 5
+sleep 3
 
-# Check if PipeWire started successfully
+# Verify PipeWire is running
 if ! run_systemctl "is-active pipewire.service"; then
     echo "Error: PipeWire failed to start. Checking logs..."
     run_systemctl "status pipewire.service"
@@ -463,20 +417,27 @@ fi
 echo "Starting WirePlumber..."
 run_systemctl "enable wireplumber.service"
 run_systemctl "start wireplumber.service"
-sleep 5
+sleep 3
 
-# Finally start PipeWire-Pulse service
-echo "Starting PipeWire-PulseAudio service..."
+# Verify WirePlumber is running
+if ! run_systemctl "is-active wireplumber.service"; then
+    echo "Error: WirePlumber failed to start. Checking logs..."
+    run_systemctl "status wireplumber.service"
+    exit 1
+fi
+
+# Start PipeWire-Pulse
+echo "Starting PipeWire-PulseAudio..."
+run_systemctl "enable pipewire-pulse.socket"
+run_systemctl "start pipewire-pulse.socket"
+sleep 2
 run_systemctl "enable pipewire-pulse.service"
 run_systemctl "start pipewire-pulse.service"
 sleep 3
-run_systemctl "enable pipewire-pulse.service"
-run_systemctl "start pipewire-pulse.service"
-sleep 5
 
-# Final verification with detailed status
-echo "Verifying services..."
-for service in pipewire.socket pipewire-pulse.socket pipewire.service wireplumber.service pipewire-pulse.service; do
+# Final verification
+echo "Verifying all services..."
+for service in dbus.socket pipewire.socket pipewire.service wireplumber.service pipewire-pulse.socket pipewire-pulse.service; do
     echo "Checking $service..."
     if ! run_systemctl "is-active $service"; then
         echo "Warning: $service failed to start"
@@ -513,4 +474,97 @@ fi
 
 echo "Installation complete!"
 echo "NOTE: You may need to log out and log back in for group changes to take effect."
-echo "To test the setup, run: python3 -m bluebard.tools.test_audio" 
+echo "To test the setup, run: python3 -m bluebard.tools.test_audio"
+
+# Check and install required packages
+echo "Checking and installing required packages..."
+REQUIRED_PACKAGES=(
+    "pipewire"
+    "pipewire-audio"
+    "wireplumber"
+    "pipewire-pulse"
+    "pipewire-alsa"
+    "pipewire-jack"
+    "pipewire-v4l2"
+    "pipewire-bin"
+    "libspa-0.2-bluetooth"
+    "libspa-0.2-jack"
+    "libspa-alsa"
+    "python3-dbus"
+    "python3-gi"
+    "dbus"
+)
+
+# Detect package manager
+if command -v apt-get >/dev/null 2>&1; then
+    PKG_MANAGER="apt-get"
+    INSTALL_CMD="apt-get install -y"
+elif command -v dnf >/dev/null 2>&1; then
+    PKG_MANAGER="dnf"
+    INSTALL_CMD="dnf install -y"
+elif command -v pacman >/dev/null 2>&1; then
+    PKG_MANAGER="pacman"
+    INSTALL_CMD="pacman -S --noconfirm"
+else
+    echo "Error: No supported package manager found"
+    exit 1
+fi
+
+# Update package lists
+echo "Updating package lists..."
+if [ "$PKG_MANAGER" = "apt-get" ]; then
+    run_as_root apt-get update
+elif [ "$PKG_MANAGER" = "dnf" ]; then
+    run_as_root dnf check-update || true
+elif [ "$PKG_MANAGER" = "pacman" ]; then
+    run_as_root pacman -Sy
+fi
+
+# Install packages
+echo "Installing required packages..."
+for pkg in "${REQUIRED_PACKAGES[@]}"; do
+    if ! run_as_root $PKG_MANAGER list installed "$pkg" >/dev/null 2>&1; then
+        echo "Installing $pkg..."
+        run_as_root $INSTALL_CMD "$pkg"
+    fi
+done
+
+# Ensure PipeWire is not running as a system service
+echo "Ensuring PipeWire is running as user service only..."
+run_as_root systemctl mask pipewire.service pipewire.socket
+run_as_root systemctl mask pipewire-pulse.service pipewire-pulse.socket
+
+# Remove any system-wide PulseAudio installation
+echo "Removing system-wide PulseAudio..."
+if [ "$PKG_MANAGER" = "apt-get" ]; then
+    run_as_root apt-get remove --purge -y pulseaudio-system-daemon || true
+elif [ "$PKG_MANAGER" = "dnf" ]; then
+    run_as_root dnf remove -y pulseaudio-system || true
+elif [ "$PKG_MANAGER" = "pacman" ]; then
+    run_as_root pacman -R --noconfirm pulseaudio-system || true
+fi
+
+# After directory setup, ensure XDG_RUNTIME_DIR exists and has correct permissions
+echo "Setting up XDG runtime directory..."
+run_as_root mkdir -p /run/user/$(id -u "$ACTUAL_USER")
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" /run/user/$(id -u "$ACTUAL_USER")
+run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")
+
+# Set environment variables
+export XDG_RUNTIME_DIR="/run/user/$(id -u "$ACTUAL_USER")"
+export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR/pipewire"
+
+# Create systemd override for PipeWire service
+echo "Creating systemd override for PipeWire..."
+run_as_root mkdir -p /etc/systemd/system/pipewire.service.d
+run_as_root install -m 644 /dev/stdin /etc/systemd/system/pipewire.service.d/override.conf << EOF
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+EOF 
