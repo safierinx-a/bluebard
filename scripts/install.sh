@@ -266,10 +266,95 @@ run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pipewire
 run_as_root chmod 700 /run/user/$(id -u "$ACTUAL_USER")/pulse
 run_as_root chmod 700 /var/cache/pipewire
 
-# Update PipeWire configuration to prevent module loading issues
+# Create systemd user service overrides
+echo "Creating systemd user service overrides..."
+
+# Create pipewire service override
+PIPEWIRE_SERVICE_OVERRIDE="$USER_HOME/.config/systemd/user/pipewire.service.d/override.conf"
+run_as_user mkdir -p "$(dirname "$PIPEWIRE_SERVICE_OVERRIDE")"
+cat << EOF > /tmp/pipewire_override.conf
+[Unit]
+Description=PipeWire Multimedia Service
+After=dbus.socket
+Requires=dbus.socket pipewire.socket
+ConditionUser=!root
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pipewire
+Restart=on-failure
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+Also=pipewire.socket
+WantedBy=default.target
+EOF
+run_as_root install -m 644 /tmp/pipewire_override.conf "$PIPEWIRE_SERVICE_OVERRIDE"
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" "$PIPEWIRE_SERVICE_OVERRIDE"
+rm -f /tmp/pipewire_override.conf
+
+# Create wireplumber service override
+WIREPLUMBER_SERVICE_OVERRIDE="$USER_HOME/.config/systemd/user/wireplumber.service.d/override.conf"
+run_as_user mkdir -p "$(dirname "$WIREPLUMBER_SERVICE_OVERRIDE")"
+cat << EOF > /tmp/wireplumber_override.conf
+[Unit]
+Description=WirePlumber Session Manager
+After=dbus.socket pipewire.service
+Requires=dbus.socket pipewire.service
+ConditionUser=!root
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wireplumber
+Restart=on-failure
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
+
+[Install]
+WantedBy=pipewire.service
+EOF
+run_as_root install -m 644 /tmp/wireplumber_override.conf "$WIREPLUMBER_SERVICE_OVERRIDE"
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" "$WIREPLUMBER_SERVICE_OVERRIDE"
+rm -f /tmp/wireplumber_override.conf
+
+# Create pipewire-pulse service override
+PIPEWIRE_PULSE_SERVICE_OVERRIDE="$USER_HOME/.config/systemd/user/pipewire-pulse.service.d/override.conf"
+run_as_user mkdir -p "$(dirname "$PIPEWIRE_PULSE_SERVICE_OVERRIDE")"
+cat << EOF > /tmp/pipewire_pulse_override.conf
+[Unit]
+Description=PipeWire PulseAudio
+After=pipewire.service wireplumber.service
+Requires=pipewire.service pipewire-pulse.socket
+ConditionUser=!root
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pipewire-pulse
+Restart=on-failure
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
+Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
+Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u "$ACTUAL_USER")/pulse
+
+[Install]
+Also=pipewire-pulse.socket
+WantedBy=default.target
+EOF
+run_as_root install -m 644 /tmp/pipewire_pulse_override.conf "$PIPEWIRE_PULSE_SERVICE_OVERRIDE"
+run_as_root chown "$ACTUAL_USER:$ACTUAL_USER" "$PIPEWIRE_PULSE_SERVICE_OVERRIDE"
+rm -f /tmp/pipewire_pulse_override.conf
+
+# Update PipeWire configuration
 echo "Updating PipeWire configuration..."
-run_as_root mkdir -p /etc/pipewire/pipewire.conf.d
-run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.conf << EOF
+PIPEWIRE_CONFIG="/etc/pipewire/pipewire.conf.d/99-bluebard.conf"
+run_as_root mkdir -p "$(dirname "$PIPEWIRE_CONFIG")"
+cat << EOF > /tmp/pipewire.conf
 {
     "context.properties": {
         "default.clock.rate": 48000,
@@ -308,78 +393,12 @@ run_as_root install -m 644 /dev/stdin /etc/pipewire/pipewire.conf.d/99-bluebard.
     }
 }
 EOF
+run_as_root install -m 644 /tmp/pipewire.conf "$PIPEWIRE_CONFIG"
+rm -f /tmp/pipewire.conf
 
 # Ensure systemd user instance is clean
 run_systemctl "daemon-reload"
 run_systemctl "reset-failed"
-
-# Create systemd user service overrides
-echo "Creating systemd user service overrides..."
-run_as_user mkdir -p "$USER_HOME/.config/systemd/user/pipewire.service.d"
-run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/systemd/user/pipewire.service.d/override.conf" << EOF
-[Unit]
-Description=PipeWire Multimedia Service
-After=dbus.socket
-Requires=dbus.socket pipewire.socket
-ConditionUser=!root
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/pipewire
-Restart=on-failure
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
-Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-NoNewPrivileges=yes
-RestrictNamespaces=yes
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-
-[Install]
-Also=pipewire.socket
-WantedBy=default.target
-EOF
-
-run_as_user mkdir -p "$USER_HOME/.config/systemd/user/wireplumber.service.d"
-run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/systemd/user/wireplumber.service.d/override.conf" << EOF
-[Unit]
-Description=WirePlumber Session Manager
-After=dbus.socket pipewire.service
-Requires=dbus.socket pipewire.service
-ConditionUser=!root
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/wireplumber
-Restart=on-failure
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
-Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
-
-[Install]
-WantedBy=pipewire.service
-EOF
-
-run_as_user mkdir -p "$USER_HOME/.config/systemd/user/pipewire-pulse.service.d"
-run_as_user install -m 644 /dev/stdin "$USER_HOME/.config/systemd/user/pipewire-pulse.service.d/override.conf" << EOF
-[Unit]
-Description=PipeWire PulseAudio
-After=pipewire.service wireplumber.service
-Requires=pipewire.service pipewire-pulse.socket
-ConditionUser=!root
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/pipewire-pulse
-Restart=on-failure
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")
-Environment=PIPEWIRE_RUNTIME_DIR=/run/user/$(id -u "$ACTUAL_USER")/pipewire
-Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u "$ACTUAL_USER")/pulse
-
-[Install]
-Also=pipewire-pulse.socket
-WantedBy=default.target
-EOF
 
 # Reload systemd to recognize changes
 run_systemctl "daemon-reload"
