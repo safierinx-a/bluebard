@@ -18,14 +18,34 @@ fi
 
 echo "Installing Bluebard Audio System..."
 
-# Function to run a command as the actual user
+# Function to run a command as the actual user with proper D-Bus session
 run_as_user() {
-    sudo -u "$ACTUAL_USER" "$@"
+    # Get user's runtime directory
+    USER_RUNTIME_DIR="/run/user/$(id -u "$ACTUAL_USER")"
+    
+    # Ensure runtime directory exists and has correct permissions
+    mkdir -p "$USER_RUNTIME_DIR"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$USER_RUNTIME_DIR"
+    chmod 700 "$USER_RUNTIME_DIR"
+
+    # Run the command with proper environment
+    sudo -u "$ACTUAL_USER" \
+        XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$USER_RUNTIME_DIR/bus" \
+        "$@"
 }
 
 # Install required packages
 echo "Installing required packages..."
 apt-get update
+
+# Install D-Bus first
+apt-get install -y dbus
+
+# Start D-Bus system daemon if not running
+if ! systemctl is-active --quiet dbus; then
+    systemctl start dbus
+fi
 
 # First, try to install pipewire-media-session as it might be needed
 apt-get install -y pipewire-media-session || true
@@ -49,6 +69,12 @@ apt-get install -y \
 echo "Removing conflicting packages..."
 apt-get remove -y pulseaudio-module-bluetooth || true
 apt-get autoremove -y
+
+# Ensure D-Bus session is running for the user
+echo "Setting up D-Bus session..."
+if ! run_as_user dbus-launch --sh-syntax > /dev/null; then
+    echo "Warning: Could not start D-Bus session"
+fi
 
 # Stop and disable PulseAudio for the user
 echo "Disabling PulseAudio..."
@@ -78,7 +104,13 @@ systemctl restart bluetooth
 echo "Cleaning up existing PipeWire configuration..."
 rm -rf /home/"$ACTUAL_USER"/.config/systemd/user/pipewire* || true
 rm -rf /home/"$ACTUAL_USER"/.config/systemd/user/wireplumber* || true
-systemctl --user daemon-reload || true
+
+# Reload systemd user daemon
+run_as_user systemctl --user daemon-reload
+
+# Start D-Bus user session if not running
+run_as_user systemctl --user start dbus.socket || true
+run_as_user systemctl --user start dbus.service || true
 
 # Enable and start PipeWire services for the user
 echo "Starting PipeWire services..."
