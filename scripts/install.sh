@@ -22,15 +22,23 @@ echo "Installing Bluebard Audio System..."
 run_as_user() {
     # Get user's runtime directory
     USER_RUNTIME_DIR="/run/user/$(id -u "$ACTUAL_USER")"
+    USER_HOME="/home/$ACTUAL_USER"
     
     # Ensure runtime directory exists and has correct permissions
     mkdir -p "$USER_RUNTIME_DIR"
     chown "$ACTUAL_USER:$ACTUAL_USER" "$USER_RUNTIME_DIR"
     chmod 700 "$USER_RUNTIME_DIR"
 
+    # Ensure config directories exist
+    mkdir -p "$USER_HOME/.config/systemd/user"
+    mkdir -p "$USER_HOME/.config/pipewire"
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$USER_HOME/.config"
+
     # Run the command with proper environment
     sudo -u "$ACTUAL_USER" \
+        HOME="$USER_HOME" \
         XDG_RUNTIME_DIR="$USER_RUNTIME_DIR" \
+        XDG_CONFIG_HOME="$USER_HOME/.config" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=$USER_RUNTIME_DIR/bus" \
         "$@"
 }
@@ -39,8 +47,8 @@ run_as_user() {
 echo "Installing required packages..."
 apt-get update
 
-# Install D-Bus first
-apt-get install -y dbus
+# Install D-Bus and utilities first
+apt-get install -y dbus pulseaudio-utils
 
 # Start D-Bus system daemon if not running
 if ! systemctl is-active --quiet dbus; then
@@ -67,8 +75,14 @@ apt-get install -y \
 
 # Remove conflicting packages
 echo "Removing conflicting packages..."
-apt-get remove -y pulseaudio-module-bluetooth || true
+apt-get remove -y pulseaudio pulseaudio-module-bluetooth || true
 apt-get autoremove -y
+
+# Kill any existing PipeWire processes
+echo "Cleaning up existing processes..."
+pkill -u "$ACTUAL_USER" -9 pipewire || true
+pkill -u "$ACTUAL_USER" -9 wireplumber || true
+sleep 1
 
 # Ensure D-Bus session is running for the user
 echo "Setting up D-Bus session..."
@@ -97,13 +111,42 @@ ReconnectAttempts = 5
 ReconnectIntervals = 1,2,4,8,16
 EOF
 
+# Configure PipeWire
+echo "Configuring PipeWire..."
+cat > "/home/$ACTUAL_USER/.config/pipewire/pipewire.conf" << EOF
+context.properties = {
+    link.max-buffers = 16
+    core.daemon = true
+    core.name = pipewire-0
+    vm.overrides = { default.clock.min-quantum = 1024 }
+}
+
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    api.alsa.* = alsa/libspa-alsa
+    api.v4l2.* = v4l2/libspa-v4l2
+    api.bluez5.* = bluez5/libspa-bluez5
+}
+
+context.modules = [
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-adapter }
+    { name = libpipewire-module-metadata }
+    { name = libpipewire-module-session-manager }
+]
+EOF
+
+chown -R "$ACTUAL_USER:$ACTUAL_USER" "/home/$ACTUAL_USER/.config/pipewire"
+
 # Restart Bluetooth service
 systemctl restart bluetooth
 
 # Clean up any existing PipeWire configuration that might cause conflicts
 echo "Cleaning up existing PipeWire configuration..."
-rm -rf /home/"$ACTUAL_USER"/.config/systemd/user/pipewire* || true
-rm -rf /home/"$ACTUAL_USER"/.config/systemd/user/wireplumber* || true
+rm -rf "/home/$ACTUAL_USER/.config/systemd/user/pipewire*" || true
+rm -rf "/home/$ACTUAL_USER/.config/systemd/user/wireplumber*" || true
+rm -f "/run/user/$(id -u "$ACTUAL_USER")/pipewire-*" || true
 
 # Reload systemd user daemon
 run_as_user systemctl --user daemon-reload
@@ -115,21 +158,22 @@ run_as_user systemctl --user start dbus.service || true
 # Enable and start PipeWire services for the user
 echo "Starting PipeWire services..."
 run_as_user systemctl --user --now enable pipewire.socket
-sleep 1
+sleep 2
 run_as_user systemctl --user --now enable pipewire.service
-sleep 1
+sleep 2
 run_as_user systemctl --user --now enable wireplumber.service
-sleep 1
+sleep 2
 run_as_user systemctl --user --now enable pipewire-pulse.socket
-sleep 1
+sleep 2
 run_as_user systemctl --user --now enable pipewire-pulse.service
+sleep 2
 
 # Verify installation
 echo "Verifying installation..."
 sleep 2
 
 # Check PipeWire status with more detailed error reporting
-if ! run_as_user pactl info | grep -q "Server Name.*PipeWire"; then
+if ! run_as_user pw-cli info 2>/dev/null | grep -q "PipeWire"; then
     echo "Error: PipeWire is not running correctly"
     echo "Checking service status..."
     run_as_user systemctl --user status pipewire.service
